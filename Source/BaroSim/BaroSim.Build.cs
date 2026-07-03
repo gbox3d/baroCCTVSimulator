@@ -20,9 +20,10 @@ public class BaroSim : ModuleRules
 		// Private: 구현부(.cpp)에서만 쓰는 의존성.
 		//   - Json:                Hucoms 응답 / baro_vla 추론 JSON 파싱
 		//   - Sockets, Networking: FMjpegStreamServer 연속 MJPEG TCP 스트림
+		//   - ImageCore:           FImage(PTZCaptureComponent/CenteringClientComponent 캡처) 직접 사용 — 전이의존 대신 명시
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"Json", "Sockets", "Networking"
+			"Json", "Sockets", "Networking", "ImageCore"
 		});
 	}
 }

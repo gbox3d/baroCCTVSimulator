@@ -239,7 +239,7 @@ bool UCenteringClientComponent::CaptureToJpeg(TArray64<uint8>& OutJpeg)
 
 namespace
 {
-	void AppendUtf8(TArray<uint8>& Body, const FString& Str)
+	void CenteringAppendUtf8(TArray<uint8>& Body, const FString& Str)
 	{
 		FTCHARToUTF8 Conv(*Str);
 		Body.Append(reinterpret_cast<const uint8*>(Conv.Get()), Conv.Length());
@@ -254,16 +254,16 @@ TArray<uint8> UCenteringClientComponent::BuildMultipartBody(const FString& Bound
 	TArray<uint8> Body;
 	Body.Reserve(static_cast<int32>(Jpeg.Num()) + 1024);
 
-	AppendUtf8(Body, FString::Printf(
+	CenteringAppendUtf8(Body, FString::Printf(
 		TEXT("--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"capture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"),
 		*Boundary));
 	Body.Append(Jpeg.GetData(), IntCastChecked<int32>(Jpeg.Num()));
-	AppendUtf8(Body, TEXT("\r\n"));
+	CenteringAppendUtf8(Body, TEXT("\r\n"));
 
 	const auto AddField = [&Body, &Boundary](const TCHAR* Name, float Value)
 	{
 		// FString::Printf 의 %f 는 로캘 독립(항상 '.') — Unity 의 InvariantCulture 우려 없음.
-		AppendUtf8(Body, FString::Printf(
+		CenteringAppendUtf8(Body, FString::Printf(
 			TEXT("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%.3f\r\n"),
 			*Boundary, Name, Value));
 	};
@@ -271,7 +271,7 @@ TArray<uint8> UCenteringClientComponent::BuildMultipartBody(const FString& Bound
 	AddField(TEXT("current_tilt"), Tilt);
 	AddField(TEXT("current_zoom"), Zoom);
 
-	AppendUtf8(Body, FString::Printf(TEXT("--%s--\r\n"), *Boundary));
+	CenteringAppendUtf8(Body, FString::Printf(TEXT("--%s--\r\n"), *Boundary));
 	return Body;
 }
 
