@@ -1,0 +1,11 @@
+# 소스는 텍스트로 정규화 (팀 크로스플랫폼 일관성)
+*.h    text
+*.cpp  text
+*.cs   text
+*.ini  text
+*.md   text
+*.uplugin text
+
+# UE 바이너리 에셋(플러그인 Content 추가 시)
+*.uasset binary
+*.umap   binary

@@ -1,0 +1,13 @@
+# Unreal plugin build artifacts (소스만 버전관리, 산출물은 각 프로젝트에서 재생성)
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
