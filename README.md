@@ -1,4 +1,4 @@
-# BaroSim — CCTV PTZ 시뮬레이터 플러그인 (UE 5.8)
+﻿# baroCCTVSimulator — CCTV PTZ 시뮬레이터 플러그인 (UE 5.8)
 
 주차장 CCTV PTZ 카메라를 언리얼 안에서 "실기(Hucoms)처럼" 행세시키는 재사용 가능한 런타임 플러그인.
 `baro_calory`(Node/Python AI 에이전트)가 실기 IP 대신 이 시뮬레이터에 붙어 동일 프로토콜로 동작하도록 한다.
@@ -27,10 +27,10 @@
 
 ## 모듈 구성
 
-- 모듈명: `BaroSim` (Runtime, LoadingPhase Default)
-- `Source/BaroSim/Public/` — 공개 헤더 10
-- `Source/BaroSim/Private/` — 구현 9 + 모듈 부트(`BaroSimModule.cpp`)
-- export 매크로: `BAROSIM_API`
+- 모듈명: `baroCCTVSimulator` (Runtime, LoadingPhase Default)
+- `Source/baroCCTVSimulator/Public/` — 공개 헤더 10
+- `Source/baroCCTVSimulator/Private/` — 구현 9 + 모듈 부트(`baroCCTVSimulatorModule.cpp`)
+- export 매크로: `BAROCCTVSIMULATOR_API`
 
 ## 의존성
 
@@ -43,17 +43,17 @@
 
 ```bash
 # 프로젝트 루트에서
-git submodule add <BaroSim-repo-url> Plugins/BaroSim
+git submodule add <baroCCTVSimulator-repo-url> Plugins/baroCCTVSimulator
 git submodule update --init --recursive
 ```
 
 그다음:
 
-1. `<Project>.uproject` 의 `"Plugins"` 배열에 `{ "Name": "BaroSim", "Enabled": true }` 추가.
-2. 게임 모듈 `*.Build.cs` 의 의존성에 `"BaroSim"` 추가.
+1. `<Project>.uproject` 의 `"Plugins"` 배열에 `{ "Name": "baroCCTVSimulator", "Enabled": true }` 추가.
+2. 게임 모듈 `*.Build.cs` 의 의존성에 `"baroCCTVSimulator"` 추가.
 3. 프로젝트 파일 재생성 후 에디터 타깃 빌드.
 
-> 로컬에서 원격 없이 먼저 붙일 때는 URL 자리에 로컬 경로(`C:/works/ue_prjs/BaroSim`)를 써도 된다.
+> 로컬에서 원격 없이 먼저 붙일 때는 URL 자리에 로컬 경로(`C:/works/ue_prjs/baroCCTVSimulator`)를 써도 된다.
 > 이후 GitHub 원격을 만들면 `git submodule set-url` 로 교체.
 
 ## 설정 키 (config)
@@ -61,7 +61,7 @@ git submodule update --init --recursive
 `Config/DefaultGame.ini` 에 아래 섹션으로 오버라이드 (모듈명이 섹션 경로에 들어감):
 
 ```ini
-[/Script/BaroSim.HucomsServerSubsystem]
+[/Script/baroCCTVSimulator.HucomsServerSubsystem]
 BaseHttpPort=8081      ; 자동 포트 시작값(카메라 인덱스 가산)
 BaseMjpegPort=8091
 StreamFps=30           ; 연속 MJPEG 목표 fps
@@ -75,7 +75,7 @@ CaptureExposureBias=-0.7
 
 ```ini
 [/Script/EngineSettings.GameMapsSettings]
-GlobalDefaultGameMode=/Script/BaroSim.BaroSimGameMode
+GlobalDefaultGameMode=/Script/baroCCTVSimulator.BaroSimGameMode
 ```
 
 ## 포트 규약

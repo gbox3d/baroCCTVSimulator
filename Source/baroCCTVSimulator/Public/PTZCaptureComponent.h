@@ -21,7 +21,7 @@ class UTextureRenderTarget2D;
  * CaptureJpeg() 는 동기 렌더+리드백(렌더 명령 플러시 = 한 프레임 히치)이며 게임스레드에서 호출.
  */
 UCLASS(ClassGroup = (PTZ), meta = (BlueprintSpawnableComponent))
-class BAROSIM_API UPTZCaptureComponent : public UActorComponent
+class BAROCCTVSIMULATOR_API UPTZCaptureComponent : public UActorComponent
 {
 	GENERATED_BODY()
 

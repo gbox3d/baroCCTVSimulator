@@ -65,13 +65,13 @@ struct FHucomsChannel
  * 수명: 게임/PIE 월드의 BeginPlay 에 채널 서버들 시작, Deinitialize 에 정지.
  */
 UCLASS(config = Game)
-class BAROSIM_API UHucomsServerSubsystem : public UTickableWorldSubsystem
+class BAROCCTVSIMULATOR_API UHucomsServerSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
 public:
 	//==================================================================================
-	// Config (DefaultGame.ini 의 [/Script/BaroSim.HucomsServerSubsystem] 로 오버라이드 가능)
+	// Config (DefaultGame.ini 의 [/Script/baroCCTVSimulator.HucomsServerSubsystem] 로 오버라이드 가능)
 	//==================================================================================
 
 	/** 자동 포트 부여 시작값(HTTP CGI). 카메라 HucomsHttpPort=0 이면 BaseHttpPort + 카메라 인덱스. */
@@ -119,7 +119,7 @@ public:
 	/** jpeg.cgi 스냅샷 가로 해상도. QHD(2560x1440) — 굶은 4K 보다 TSR 로 수렴된 QHD 가 더 선명하고
 	 *  VRAM 여유가 있다(현재 RT 지오메트리 예산 초과 경고 있음). 센터링 논리프레임(1920x1080)과 무관 —
 	 *  클릭 좌표는 클라이언트가 naturalWidth 기준으로 보내고 서버에서 1920 로 스케일된다.
-	 *  (DefaultGame.ini [/Script/BaroSim.HucomsServerSubsystem] 로 오버라이드 가능. VRAM 해결 후 4K 상향 가능.) */
+	 *  (DefaultGame.ini [/Script/baroCCTVSimulator.HucomsServerSubsystem] 로 오버라이드 가능. VRAM 해결 후 4K 상향 가능.) */
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Capture", meta = (ClampMin = "64"))
 	int32 SnapshotWidth = 2560;
 

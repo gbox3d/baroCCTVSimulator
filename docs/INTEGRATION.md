@@ -1,13 +1,13 @@
-# BaroSim 통합 가이드 — baroQuantum 세우기 & baro_unreal 마이그레이션
+﻿# baroCCTVSimulator 통합 가이드 — baroQuantum 세우기 & baro_unreal 마이그레이션
 
-이 문서는 `BaroSim` 플러그인을 소비하는 두 프로젝트를 세우는 실행 절차다.
+이 문서는 `baroCCTVSimulator` 플러그인을 소비하는 두 프로젝트를 세우는 실행 절차다.
 
 ## 목차
 
 - [단일 소스 구조](#단일-소스-구조)
 - [Phase 1 — baroQuantum 세우기 (심플 프레임워크)](#phase-1--baroquantum-세우기-심플-프레임워크)
   - [1. 빈 C++ 프로젝트 생성](#1-빈-c-프로젝트-생성)
-  - [2. BaroSim submodule 부착](#2-barosim-submodule-부착)
+  - [2. baroCCTVSimulator submodule 부착](#2-barosim-submodule-부착)
   - [3. .uproject 에 플러그인 등록](#3-uproject-에-플러그인-등록)
   - [4. Config 설정](#4-config-설정)
   - [5. 빌드](#5-빌드)
@@ -20,16 +20,16 @@
 
 ```
 C:\works\ue_prjs\
-├── BaroSim\           ← CCTV 시뮬 C++ 의 유일한 진실 소스 (이 저장소, 독립 git)
-├── baroQuantum\       ← 심플 프레임워크/시연용. Plugins/BaroSim = submodule
-└── baro_unreal\       ← 실사 개발용(30GB). Plugins/BaroSim = submodule (Phase 2)
+├── baroCCTVSimulator\           ← CCTV 시뮬 C++ 의 유일한 진실 소스 (이 저장소, 독립 git)
+├── baroQuantum\       ← 심플 프레임워크/시연용. Plugins/baroCCTVSimulator = submodule
+└── baro_unreal\       ← 실사 개발용(30GB). Plugins/baroCCTVSimulator = submodule (Phase 2)
 ```
 
-버그픽스/기능은 `BaroSim` 에서만 하고, 두 프로젝트는 submodule 포인터만 갱신한다.
+버그픽스/기능은 `baroCCTVSimulator` 에서만 하고, 두 프로젝트는 submodule 포인터만 갱신한다.
 
-> **GitHub 원격 권장**: 팀 공유를 하려면 `BaroSim` 을 먼저 GitHub(private)로 push 하고,
+> **GitHub 원격 권장**: 팀 공유를 하려면 `baroCCTVSimulator` 을 먼저 GitHub(private)로 push 하고,
 > 그 URL 로 submodule 을 건다. 원격 없이 로컬에서 먼저 검증하려면 submodule URL 자리에
-> 로컬 경로(`C:/works/ue_prjs/BaroSim`)를 써도 된다(나중에 `git submodule set-url` 로 교체).
+> 로컬 경로(`C:/works/ue_prjs/baroCCTVSimulator`)를 써도 된다(나중에 `git submodule set-url` 로 교체).
 
 ---
 
@@ -44,17 +44,17 @@ Epic Launcher → **UE 5.8** → New Project → **Games → Blank** →
 
 에디터가 열리면 **일단 닫는다** (아래 submodule/config 후 재빌드).
 
-### 2. BaroSim submodule 부착
+### 2. baroCCTVSimulator submodule 부착
 
 ```bash
 cd C:/works/ue_prjs/baroQuantum
 git init            # 런처가 git 을 안 만들었다면
-git submodule add C:/works/ue_prjs/BaroSim Plugins/BaroSim
-#  또는 원격이 있으면:  git submodule add <BaroSim-repo-url> Plugins/BaroSim
+git submodule add C:/works/ue_prjs/baroCCTVSimulator Plugins/baroCCTVSimulator
+#  또는 원격이 있으면:  git submodule add <baroCCTVSimulator-repo-url> Plugins/baroCCTVSimulator
 git submodule update --init --recursive
 ```
 
-`baroQuantum/Plugins/BaroSim/BaroSim.uplugin` 이 보이면 성공.
+`baroQuantum/Plugins/baroCCTVSimulator/baroCCTVSimulator.uplugin` 이 보이면 성공.
 
 ### 3. .uproject 에 플러그인 등록
 
@@ -62,14 +62,14 @@ git submodule update --init --recursive
 
 ```json
 "Plugins": [
-    { "Name": "BaroSim", "Enabled": true }
+    { "Name": "baroCCTVSimulator", "Enabled": true }
 ]
 ```
 
-> 게임 모듈 `Build.cs` 에는 `"BaroSim"` 의존성을 **추가하지 않아도 된다** — baroQuantum
-> 게임 코드는 BaroSim 타입을 직접 참조하지 않고, GameMode 는 config 문자열
-> `/Script/BaroSim.BaroSimGameMode` 로 런타임 해석되기 때문. (나중에 게임 모듈 C++ 에서
-> BaroSim 클래스를 직접 쓰게 되면 그때 추가.)
+> 게임 모듈 `Build.cs` 에는 `"baroCCTVSimulator"` 의존성을 **추가하지 않아도 된다** — baroQuantum
+> 게임 코드는 baroCCTVSimulator 타입을 직접 참조하지 않고, GameMode 는 config 문자열
+> `/Script/baroCCTVSimulator.BaroSimGameMode` 로 런타임 해석되기 때문. (나중에 게임 모듈 C++ 에서
+> baroCCTVSimulator 클래스를 직접 쓰게 되면 그때 추가.)
 
 ### 4. Config 설정
 
@@ -78,7 +78,7 @@ git submodule update --init --recursive
 ```ini
 [/Script/EngineSettings.GameMapsSettings]
 GameDefaultMap=/Game/simulator/LV_Quantum_sim_01
-GlobalDefaultGameMode=/Script/BaroSim.BaroSimGameMode
+GlobalDefaultGameMode=/Script/baroCCTVSimulator.BaroSimGameMode
 
 [/Script/Engine.RendererSettings]
 r.DynamicGlobalIlluminationMethod=1
@@ -89,7 +89,7 @@ r.GenerateMeshDistanceFields=True
 `Config/DefaultGame.ini`:
 
 ```ini
-[/Script/BaroSim.HucomsServerSubsystem]
+[/Script/baroCCTVSimulator.HucomsServerSubsystem]
 BaseHttpPort=8081
 BaseMjpegPort=8091
 StreamFps=30
@@ -99,7 +99,7 @@ CaptureContrast=1.2
 CaptureExposureBias=-0.7
 ```
 
-> baroQuantum 은 **신규 프로젝트라 CoreRedirects 가 필요 없다** — 처음부터 `/Script/BaroSim.*`
+> baroQuantum 은 **신규 프로젝트라 CoreRedirects 가 필요 없다** — 처음부터 `/Script/baroCCTVSimulator.*`
 > 를 참조한다. (기존 콘텐츠를 가진 baro_unreal 만 Phase 2 에서 redirect 가 필요.)
 
 ### 5. 빌드
@@ -111,7 +111,7 @@ CaptureExposureBias=-0.7
   baroQuantumEditor Win64 Development -Project="C:\works\ue_prjs\baroQuantum\baroQuantum.uproject" -WaitMutex
 ```
 
-빌드가 성공하면 BaroSim 모듈(19파일)이 baroQuantum 컨텍스트에서 **최초로 실제 컴파일**된다.
+빌드가 성공하면 baroCCTVSimulator 모듈(19파일)이 baroQuantum 컨텍스트에서 **최초로 실제 컴파일**된다.
 (플러그인 단독으로는 컴파일 불가 — 반드시 호스트 프로젝트 안에서 빌드된다.)
 
 ### 6. 그레이박스 데모 레벨 제작
@@ -187,7 +187,7 @@ curl "http://127.0.0.1:8082/cgi-bin/image/jpeg.cgi" -o snap02.jpg
 2. **submodule 부착**
    ```bash
    cd C:/works/ue_prjs/baro_unreal
-   git submodule add C:/works/ue_prjs/BaroSim Plugins/BaroSim
+   git submodule add C:/works/ue_prjs/baroCCTVSimulator Plugins/baroCCTVSimulator
    ```
 
 3. **게임 모듈에서 CCTV 19파일 삭제** — `Source/baro_unreal/` 에서 아래만 남기고 삭제:
@@ -196,37 +196,37 @@ curl "http://127.0.0.1:8082/cgi-bin/image/jpeg.cgi" -o snap02.jpg
      `PTZPlayerController.*`, `MjpegStreamServer.*`, `CenteringClientComponent.*`,
      `BaroSimGameMode.*`, `BaroSimHUD.*`, `BaroSimPlayerController.*`
 
-4. **`baro_unreal.uproject`** — `"Plugins"` 에 `{ "Name": "BaroSim", "Enabled": true }` 추가.
+4. **`baro_unreal.uproject`** — `"Plugins"` 에 `{ "Name": "baroCCTVSimulator", "Enabled": true }` 추가.
 
 5. **`baro_unreal.Build.cs`** — CCTV 전용이던 Private 의존성 제거(플러그인이 자체 보유):
    ```csharp
    PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
-   // HTTP/Json/HTTPServer/Sockets/Networking 줄 삭제 (BaroSim 플러그인으로 이동됨)
+   // HTTP/Json/HTTPServer/Sockets/Networking 줄 삭제 (baroCCTVSimulator 플러그인으로 이동됨)
    ```
 
 6. **Config 경로 갱신** — 모듈명이 바뀌었으므로:
    - `Config/DefaultEngine.ini`:
-     `GlobalDefaultGameMode=/Script/baro_unreal.BaroSimGameMode` → `=/Script/BaroSim.BaroSimGameMode`
+     `GlobalDefaultGameMode=/Script/baro_unreal.BaroSimGameMode` → `=/Script/baroCCTVSimulator.BaroSimGameMode`
    - `Config/DefaultGame.ini`:
-     `[/Script/baro_unreal.HucomsServerSubsystem]` → `[/Script/BaroSim.HucomsServerSubsystem]`
+     `[/Script/baro_unreal.HucomsServerSubsystem]` → `[/Script/baroCCTVSimulator.HucomsServerSubsystem]`
 
 7. **CoreRedirects (필수)** — 기존 `.umap`/BP 들이 네이티브 클래스를 `/Script/baro_unreal.*`
    로 참조하므로, 모듈 이동 후 깨지지 않게 `Config/DefaultEngine.ini` 에 추가:
    ```ini
    [CoreRedirects]
-   +ClassRedirects=(OldName="/Script/baro_unreal.PTZCamera",NewName="/Script/BaroSim.PTZCamera")
-   +ClassRedirects=(OldName="/Script/baro_unreal.PTZCaptureComponent",NewName="/Script/BaroSim.PTZCaptureComponent")
-   +ClassRedirects=(OldName="/Script/baro_unreal.PTZPlayerController",NewName="/Script/BaroSim.PTZPlayerController")
-   +ClassRedirects=(OldName="/Script/baro_unreal.CenteringClientComponent",NewName="/Script/BaroSim.CenteringClientComponent")
-   +ClassRedirects=(OldName="/Script/baro_unreal.HucomsServerSubsystem",NewName="/Script/BaroSim.HucomsServerSubsystem")
-   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimGameMode",NewName="/Script/BaroSim.BaroSimGameMode")
-   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimHUD",NewName="/Script/BaroSim.BaroSimHUD")
-   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimPlayerController",NewName="/Script/BaroSim.BaroSimPlayerController")
-   +StructRedirects=(OldName="/Script/baro_unreal.CenteringPlate",NewName="/Script/BaroSim.CenteringPlate")
-   +EnumRedirects=(OldName="/Script/baro_unreal.ECenteringState",NewName="/Script/BaroSim.ECenteringState")
+   +ClassRedirects=(OldName="/Script/baro_unreal.PTZCamera",NewName="/Script/baroCCTVSimulator.PTZCamera")
+   +ClassRedirects=(OldName="/Script/baro_unreal.PTZCaptureComponent",NewName="/Script/baroCCTVSimulator.PTZCaptureComponent")
+   +ClassRedirects=(OldName="/Script/baro_unreal.PTZPlayerController",NewName="/Script/baroCCTVSimulator.PTZPlayerController")
+   +ClassRedirects=(OldName="/Script/baro_unreal.CenteringClientComponent",NewName="/Script/baroCCTVSimulator.CenteringClientComponent")
+   +ClassRedirects=(OldName="/Script/baro_unreal.HucomsServerSubsystem",NewName="/Script/baroCCTVSimulator.HucomsServerSubsystem")
+   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimGameMode",NewName="/Script/baroCCTVSimulator.BaroSimGameMode")
+   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimHUD",NewName="/Script/baroCCTVSimulator.BaroSimHUD")
+   +ClassRedirects=(OldName="/Script/baro_unreal.BaroSimPlayerController",NewName="/Script/baroCCTVSimulator.BaroSimPlayerController")
+   +StructRedirects=(OldName="/Script/baro_unreal.CenteringPlate",NewName="/Script/baroCCTVSimulator.CenteringPlate")
+   +EnumRedirects=(OldName="/Script/baro_unreal.ECenteringState",NewName="/Script/baroCCTVSimulator.ECenteringState")
    ```
    > 기존 `[CoreRedirects]` 의 `BP_PTZCamera -> PTZCamera` 매핑이 `/Script/baro_unreal.PTZCamera`
-   > 를 NewName 으로 쓰고 있으면 `/Script/BaroSim.PTZCamera` 로 함께 수정.
+   > 를 NewName 으로 쓰고 있으면 `/Script/baroCCTVSimulator.PTZCamera` 로 함께 수정.
 
 8. **프로젝트 파일 재생성 + 풀 리빌드**
    ```powershell
@@ -241,7 +241,7 @@ curl "http://127.0.0.1:8082/cgi-bin/image/jpeg.cgi" -o snap02.jpg
 
 ## 트러블슈팅
 
-- **`Cannot find module 'BaroSim'`**: `.uproject` 플러그인 등록 누락 또는 submodule 이 비어 있음
+- **`Cannot find module 'baroCCTVSimulator'`**: `.uproject` 플러그인 등록 누락 또는 submodule 이 비어 있음
   (`git submodule update --init`).
 - **BP 가 클래스 참조를 잃음(baro_unreal)**: CoreRedirects(7번) 누락. ini 저장 후 에디터 재시작.
 - **Shared 빌드환경 불일치 컴파일 에러**: `*.Target.cs` 가 V7/Unreal5_8 인지 확인(코드 문제 아님).

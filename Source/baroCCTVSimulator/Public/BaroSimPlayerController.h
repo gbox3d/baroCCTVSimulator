@@ -12,7 +12,7 @@
  *  - ESC 로 종료(quit). PIE 에서는 에디터가 ESC 를 먼저 소비하므로 영향 없음.
  */
 UCLASS()
-class BAROSIM_API ABaroSimPlayerController : public APlayerController
+class BAROCCTVSIMULATOR_API ABaroSimPlayerController : public APlayerController
 {
 	GENERATED_BODY()
 

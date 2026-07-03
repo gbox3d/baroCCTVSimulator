@@ -53,7 +53,7 @@ class APlayerController;
  *   자식 BP 가 직접 추가한 Camera/DefaultSceneRoot/Arrow 는 삭제하고 네이티브 계층만 사용할 것.
  */
 UCLASS()
-class BAROSIM_API APTZCamera : public AActor
+class BAROCCTVSIMULATOR_API APTZCamera : public AActor
 {
 	GENERATED_BODY()
 

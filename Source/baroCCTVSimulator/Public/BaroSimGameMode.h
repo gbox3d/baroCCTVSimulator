@@ -21,7 +21,7 @@
  * (관제 UI 용 APTZPlayerController/BP_Controller 흐름과는 별개 — 그쪽은 UMG 프로젝트용.)
  */
 UCLASS()
-class BAROSIM_API ABaroSimGameMode : public AGameModeBase
+class BAROCCTVSIMULATOR_API ABaroSimGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
 

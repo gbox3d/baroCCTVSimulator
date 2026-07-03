@@ -1,4 +1,4 @@
-# Inventory
+﻿# Inventory
 
 ## 목차
 
@@ -11,8 +11,8 @@
 
 ## Repository
 
-- Name: `BaroSim`
-- Path: `C:\works\ue_prjs\BaroSim`
+- Name: `baroCCTVSimulator`
+- Path: `C:\works\ue_prjs\baroCCTVSimulator`
 - Summary: TODO
 
 ## Top-level structure

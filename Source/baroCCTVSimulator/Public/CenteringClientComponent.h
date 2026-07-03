@@ -70,7 +70,7 @@ enum class ECenteringState : uint8
  *  - 적용 공식: target = 캡처시점 PTZ + delta (응답 도착 시점의 현재값이 아님!)
  */
 UCLASS(ClassGroup = (PTZ), meta = (BlueprintSpawnableComponent))
-class BAROSIM_API UCenteringClientComponent : public UActorComponent
+class BAROCCTVSIMULATOR_API UCenteringClientComponent : public UActorComponent
 {
 	GENERATED_BODY()
 

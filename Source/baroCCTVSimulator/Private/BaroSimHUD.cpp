@@ -27,7 +27,7 @@ void ABaroSimHUD::DrawHUD()
 	const float X = 40.f;
 	float Y = 40.f;
 
-	DrawText(TEXT("BaroSim — CCTV 시뮬레이터"), FLinearColor::White, X, Y, GEngine->GetLargeFont(), 1.6f);
+	DrawText(TEXT("baroCCTVSimulator — CCTV 시뮬레이터"), FLinearColor::White, X, Y, GEngine->GetLargeFont(), 1.6f);
 	Y += 48.f;
 	DrawText(FString::Printf(TEXT("Hucoms 채널 %d개 서빙 중  ·  HTTP %d~  ·  MJPEG %d~"),
 		ChannelCount, HttpBase, MjpegBase), FLinearColor(0.7f, 0.85f, 1.f), X, Y, GEngine->GetMediumFont(), 1.2f);

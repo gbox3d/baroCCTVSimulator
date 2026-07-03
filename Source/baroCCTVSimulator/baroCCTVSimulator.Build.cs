@@ -1,10 +1,10 @@
-// Copyright gbox3d. All Rights Reserved.
+﻿// Copyright gbox3d. All Rights Reserved.
 
 using UnrealBuildTool;
 
-public class BaroSim : ModuleRules
+public class baroCCTVSimulator : ModuleRules
 {
-	public BaroSim(ReadOnlyTargetRules Target) : base(Target)
+	public baroCCTVSimulator(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 

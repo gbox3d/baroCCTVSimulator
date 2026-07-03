@@ -32,7 +32,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnActiveCameraChanged, APTZCamera*,
  *  - OnActiveCameraChanged 에 바인딩해 전환 시 슬라이더 값을 다시 읽어 표시.
  */
 UCLASS()
-class BAROSIM_API APTZPlayerController : public APlayerController
+class BAROCCTVSIMULATOR_API APTZPlayerController : public APlayerController
 {
 	GENERATED_BODY()
 

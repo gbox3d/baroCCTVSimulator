@@ -1,4 +1,4 @@
-# _forAI Guide
+﻿# _forAI Guide
 
 ## 목차
 
@@ -10,7 +10,7 @@
 
 ## 한 줄 요약
 
-이 디렉터리는 `BaroSim` 작업을 이어받을 때 필요한 AI 작업 문맥을 정리해 두는 곳이다.
+이 디렉터리는 `baroCCTVSimulator` 작업을 이어받을 때 필요한 AI 작업 문맥을 정리해 두는 곳이다.
 
 ## 읽는 순서
 
@@ -29,7 +29,7 @@
 
 ## 현재 스냅샷
 
-- 저장소 경로: `C:\works\ue_prjs\BaroSim`
+- 저장소 경로: `C:\works\ue_prjs\baroCCTVSimulator`
 - 대상 보드/플랫폼: TODO
 - 현재 버전: TODO
 - 메인 엔트리포인트: TODO

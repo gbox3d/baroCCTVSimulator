@@ -11,7 +11,7 @@
  * (월드 렌더가 꺼져 있어도 HUD 캔버스는 그려진다.) PIE 에서는 아무것도 그리지 않음.
  */
 UCLASS()
-class BAROSIM_API ABaroSimHUD : public AHUD
+class BAROCCTVSIMULATOR_API ABaroSimHUD : public AHUD
 {
 	GENERATED_BODY()
 

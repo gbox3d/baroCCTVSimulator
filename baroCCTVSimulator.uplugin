@@ -1,8 +1,8 @@
-{
+﻿{
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
-	"FriendlyName": "BaroSim",
+	"FriendlyName": "baroCCTVSimulator",
 	"Description": "CCTV PTZ 카메라 시뮬레이터 프레임워크 — Hucoms HTTP 제어 서버, 연속 MJPEG 스트리밍, PTZ 짐벌/캡처, VLA 관측 클라이언트.",
 	"Category": "Simulation",
 	"CreatedBy": "gbox3d",
@@ -16,7 +16,7 @@
 	"Installed": false,
 	"Modules": [
 		{
-			"Name": "BaroSim",
+			"Name": "baroCCTVSimulator",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
