@@ -13,7 +13,7 @@ public class BaroSim : ModuleRules
 		//   - HTTPServer: HucomsServerSubsystem.h 가 IHttpRouter.h / HttpResultCallback.h 를 노출
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
-			"Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput",
+			"Core", "CoreUObject", "Engine", "InputCore",
 			"HTTP", "HTTPServer"
 		});
 
