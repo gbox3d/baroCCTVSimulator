@@ -7,7 +7,7 @@
 - [단일 소스 구조](#단일-소스-구조)
 - [Phase 1 — baroQuantum 세우기 (심플 프레임워크)](#phase-1--baroquantum-세우기-심플-프레임워크)
   - [1. 빈 C++ 프로젝트 생성](#1-빈-c-프로젝트-생성)
-  - [2. baroCCTVSimulator submodule 부착](#2-barosim-submodule-부착)
+  - [2. baroCCTVSimulator submodule 부착](#2-barocctvsimulator-submodule-부착)
   - [3. .uproject 에 플러그인 등록](#3-uproject-에-플러그인-등록)
   - [4. Config 설정](#4-config-설정)
   - [5. 빌드](#5-빌드)

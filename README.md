@@ -11,6 +11,7 @@
 - [프로젝트에 추가하기 (submodule)](#프로젝트에-추가하기-submodule)
 - [설정 키 (config)](#설정-키-config)
 - [포트 규약](#포트-규약)
+- [게임모드와 실행 모드 (PIE vs standalone)](#게임모드와-실행-모드-pie-vs-standalone)
 - [검증](#검증)
 - [단일 소스 원칙](#단일-소스-원칙)
 
@@ -34,8 +35,8 @@
 
 ## 의존성
 
-- Public: `Core CoreUObject Engine InputCore EnhancedInput HTTP HTTPServer`
-- Private: `Json Sockets Networking`
+- Public: `Core CoreUObject Engine InputCore HTTP HTTPServer`
+- Private: `Json Sockets Networking ImageCore`
 
 ## 프로젝트에 추가하기 (submodule)
 
@@ -83,6 +84,45 @@ GlobalDefaultGameMode=/Script/baroCCTVSimulator.BaroSimGameMode
 - 카메라의 `HucomsHttpPort`/`HucomsMjpegPort` 가 >0 이면 그 값을, 0 이면
   `BaseHttpPort`/`BaseMjpegPort + 카메라 인덱스` 로 자동 부여.
 - `baro_calory` 의 `devices.list[].{host,port}` 와 카메라를 1:1 로 맞출 것.
+
+## 게임모드와 실행 모드 (PIE vs standalone)
+
+시뮬 게임모드 `ABaroSimGameMode` 는 "CCTV 카메라 서버"가 목적인 미니멀 게임모드다:
+`ASpectatorPawn`(비가시) + `ABaroSimHUD`(검은 화면 위 타이틀/서버상태/종료안내) + `ABaroSimPlayerController`.
+
+### 어떻게 적용되나 — 레벨이 아니라 **프로젝트 전역 config**
+
+레벨 World Settings 에 아무것도 지정하지 않아도 적용된다. 게임모드는 프로젝트 전역 config 로 붙는다:
+
+```ini
+; Config/DefaultEngine.ini
+[/Script/EngineSettings.GameMapsSettings]
+GlobalDefaultGameMode=/Script/baroCCTVSimulator.BaroSimGameMode
+```
+
+GameMode 결정 **우선순위**: `레벨 World Settings Override` > `프로젝트 GlobalDefaultGameMode` > `커맨드라인 ?game=`.
+레벨에 Override 가 없으면 전역 기본값이 자동 적용된다.
+- 특정 레벨만 다른 게임모드를 쓰려면 그 레벨 **World Settings → GameMode Override** 지정(전역을 덮어씀).
+- GUI 확인: **Project Settings → Maps & Modes → Default GameMode**.
+
+### PIE 는 정상 화면, standalone 만 검은 화면 — **의도된 설계**
+
+`ABaroSimGameMode::BeginPlay()` 는 `WorldType == EWorldType::Game`(= standalone `-game`)일 때만
+메인 뷰포트의 `bDisableWorldRendering = true` 로 월드 렌더를 끈다:
+
+| 실행 | WorldType | 메인 창 |
+|---|---|---|
+| **PIE** (에디터 ▶ Play) | `PIE` | early return → **정상 렌더** (에디터 작업 화면 유지) |
+| **standalone** (`-game`) | `Game` | **검은 화면** (헤드리스 카메라 서버) |
+
+- **검은 것은 "메인 창"뿐이다.** CCTV 프레임(`jpeg.cgi`/`mjpeg.cgi`)은 `UPTZCaptureComponent` 의
+  `SceneCapture` 가 **자체적으로 따로 렌더**하므로 검은 화면과 무관하게 정상 출력된다
+  (검은 창인 standalone 에서도 curl 로 실렌더 JPEG 이 나온다).
+- **부수효과 — 캡처 화질**: standalone 은 메인 월드 렌더가 꺼져 있어 **Lumen GI 가 SceneCapture 에
+  안 들어올 수 있다**(면이 어둡게 캡처됨). PIE 는 정상. 헤드리스 캡처 조명이 중요하면 라이팅(정적/베이크)
+  또는 캡처 설정을 별도 튜닝한다.
+- **standalone 에서도 씬을 보이게** 하려면 `BaroSimGameMode.cpp` 의 `bDisableWorldRendering = true` 를
+  config 플래그(예: `bHeadless`)로 토글화하면 된다.
 
 ## 검증
 
