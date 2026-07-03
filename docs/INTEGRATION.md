@@ -20,9 +20,9 @@
 
 ```
 C:\works\ue_prjs\
-├── baroCCTVSimulator\           ← CCTV 시뮬 C++ 의 유일한 진실 소스 (이 저장소, 독립 git)
-├── baroQuantum\       ← 심플 프레임워크/시연용. Plugins/baroCCTVSimulator = submodule
-└── baro_unreal\       ← 실사 개발용(30GB). Plugins/baroCCTVSimulator = submodule (Phase 2)
+├── baroCCTVSimulator\  ← CCTV 시뮬 C++ 의 유일한 진실 소스 (이 저장소, 독립 git)
+├── baroQuantum\        ← 심플 프레임워크/시연용. Plugins/baroCCTVSimulator = submodule
+└── baro_unreal\        ← 실사 개발용(30GB). Plugins/baroCCTVSimulator = submodule (Phase 2 완료)
 ```
 
 버그픽스/기능은 `baroCCTVSimulator` 에서만 하고, 두 프로젝트는 submodule 포인터만 갱신한다.
@@ -179,8 +179,10 @@ curl "http://127.0.0.1:8082/cgi-bin/image/jpeg.cgi" -o snap02.jpg
 
 ## Phase 2 — baro_unreal 마이그레이션 (실사 개발용)
 
-> **이교수님이 baro_unreal 개발을 잠깐 멈춰도 될 때** 진행. Live Coding 으로는 불가
-> (WorldSubsystem/모듈 구조 변경) — 에디터 닫고 CLI 풀 리빌드 필요.
+> ✅ **완료(2026-07-03)** — baro_unreal 도 이 플러그인을 submodule 로 소비하도록 이관 후 리빌드 성공.
+> 아래는 그 절차 기록(재현/역참조용). baro_unreal 쪽 변경은 아직 **미커밋**(사용자 리뷰용).
+>
+> Live Coding 으로는 불가(WorldSubsystem/모듈 구조 변경) — 에디터 닫고 CLI 풀 리빌드 필요.
 
 1. **에디터 닫기** (baro_unreal + MCP 서버 종료).
 
@@ -189,6 +191,8 @@ curl "http://127.0.0.1:8082/cgi-bin/image/jpeg.cgi" -o snap02.jpg
    cd C:/works/ue_prjs/baro_unreal
    git submodule add C:/works/ue_prjs/baroCCTVSimulator Plugins/baroCCTVSimulator
    ```
+   > ⚠️ **gotcha**: baro_unreal 은 `.gitignore` 가 `Plugins/`(상용 RYU 2.6GB) 통째 제외라 submodule add 가 막힌다.
+   > `.gitignore` 의 `Plugins/` 를 `Plugins/*` + `!Plugins/baroCCTVSimulator` 로 바꿔 **자체 플러그인만 예외처리**한 뒤 add 한다.
 
 3. **게임 모듈에서 CCTV 19파일 삭제** — `Source/baro_unreal/` 에서 아래만 남기고 삭제:
    - 남김: `baro_unreal.cpp`, `baro_unreal.h`, `baro_unreal.Build.cs` (+ `../*.Target.cs`)
