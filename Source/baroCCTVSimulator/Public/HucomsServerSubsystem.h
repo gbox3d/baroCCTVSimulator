@@ -35,6 +35,10 @@ struct FHucomsChannel
 	int32 TgtPan = 0, TgtTilt = 0, TgtZoom = 0, TgtFocus = 0;
 	bool bPtEnable = true, bZfEnable = true;
 
+	// 고정형 카메라(APTZCamera::bFixedMode 복사). true 면 이 채널은 goptzfpos/setcenter 명령과
+	// 모터 슬루를 무시하고 설치 자세로 고정한다(스트림/스냅샷은 정상). capabilityptz 는 PTZ 미지원 광고.
+	bool bFixed = false;
+
 	// --- 연속 MJPEG 스트림 서버(RTSP 브리지 입력) ---
 	FMjpegStreamServer* Stream = nullptr;
 	float StreamAccum = 0.f;

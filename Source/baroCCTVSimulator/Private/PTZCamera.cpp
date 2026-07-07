@@ -82,6 +82,14 @@ void APTZCamera::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// 고정형 모드: 모터 보간 없이 현재 자세 유지. 설치 자세는 BeginPlay 의 SnapToTarget(또는
+	// 서버의 MirrorChannel->SnapToTarget)으로 이미 컴포넌트에 반영돼 있어, 이후 Tick 은 아무것도
+	// 하지 않아도 그 자세로 고정된다. (조향 API 로 Target 이 바뀌어도 Current 는 움직이지 않는다.)
+	if (bFixedMode)
+	{
+		return;
+	}
+
 	// 이미 목표에 도달해 정지 상태면 매 프레임 갱신을 건너뛴다.
 	// (주차장에 다수의 CCTV 가 있을 때 불필요한 회전/렌더 dirty 연산 절감)
 	const bool bMoving =

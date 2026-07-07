@@ -98,6 +98,22 @@ public:
 	TObjectPtr<UCameraComponent> CameraComp;
 
 	//==================================================================================
+	// Mode (고정형 vs PTZ)
+	//==================================================================================
+
+	/**
+	 * 고정형 카메라 모드. true 면 팬/틸트/줌 조향을 무시하고 '설치 자세(각도/FOV)'로 고정한다.
+	 * 별도 고정 카메라 클래스를 만들지 않고 PTZ 의 특수 케이스로 취급 — 캡처/스트림/Hucoms 서버
+	 * 인프라를 그대로 공유한다(스트림은 고정 모드에서도 정상 동작 = 실기 고정형 CCTV 와 동일).
+	 *  - 액터 Tick 의 모터 보간을 건너뛴다(현재 자세 유지).
+	 *  - UHucomsServerSubsystem 이 이 값을 채널로 복사(FHucomsChannel::bFixed)해, goptzfpos/setcenter
+	 *    명령과 모터 슬루를 무시하고 capabilityptz 를 PTZ 미지원으로 광고한다.
+	 * 설치 자세는 에디터에서 이 액터의 Transform(방향 Yaw + 하방 Pitch)과 TargetZoomFactor 로 지정.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PTZ|Mode")
+	bool bFixedMode = false;
+
+	//==================================================================================
 	// Tunables - Limits (기계적 한계, 입력 set 시 target 을 clamp)
 	//==================================================================================
 

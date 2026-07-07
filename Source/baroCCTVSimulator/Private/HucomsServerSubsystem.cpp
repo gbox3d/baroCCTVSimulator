@@ -187,6 +187,9 @@ void UHucomsServerSubsystem::BuildChannels()
 		Ch->CurZoom = Ch->TgtZoom = 0;
 		Ch->CurFocus = Ch->TgtFocus = 0;
 
+		// 고정형: 이 채널은 PTZ 명령/모터 슬루를 무시하고 위 설치 자세(CurTilt=InstallPitch 등)로 고정.
+		Ch->bFixed = Cam->bFixedMode;
+
 		ConfigureCameraForSim(Cam);
 		Channels.Add(Ch);
 		++Index;
@@ -335,22 +338,33 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 	{
 		FHucomsChannel& Ch = *ChPtr;
 
-		// Pan: 0/35999 이음매를 넘어 최단 호로 이동.
+		if (Ch.bFixed)
 		{
-			const int32 D = HucomsProtocol::ShortestPanDiff(Ch.CurPan, Ch.TgtPan);
-			if (FMath::Abs(D) <= PanStep)
-			{
-				Ch.CurPan = HucomsProtocol::WrapPan(Ch.TgtPan);
-			}
-			else
-			{
-				Ch.CurPan = HucomsProtocol::WrapPan(Ch.CurPan + ((D > 0) ? PanStep : -PanStep));
-			}
+			// 고정형: 모터 슬루 없이 설치 자세로 고정(Cur=Tgt). 명령이 무시되므로 Tgt 는 초기 설치값 그대로.
+			Ch.CurPan   = Ch.TgtPan;
+			Ch.CurTilt  = Ch.TgtTilt;
+			Ch.CurZoom  = Ch.TgtZoom;
+			Ch.CurFocus = Ch.TgtFocus;
 		}
+		else
+		{
+			// Pan: 0/35999 이음매를 넘어 최단 호로 이동.
+			{
+				const int32 D = HucomsProtocol::ShortestPanDiff(Ch.CurPan, Ch.TgtPan);
+				if (FMath::Abs(D) <= PanStep)
+				{
+					Ch.CurPan = HucomsProtocol::WrapPan(Ch.TgtPan);
+				}
+				else
+				{
+					Ch.CurPan = HucomsProtocol::WrapPan(Ch.CurPan + ((D > 0) ? PanStep : -PanStep));
+				}
+			}
 
-		Ch.CurTilt  = StepLinear(Ch.CurTilt,  Ch.TgtTilt,  TiltStep);
-		Ch.CurZoom  = StepLinear(Ch.CurZoom,  Ch.TgtZoom,  ZoomStep);
-		Ch.CurFocus = Ch.TgtFocus; // 포커스는 즉시
+			Ch.CurTilt  = StepLinear(Ch.CurTilt,  Ch.TgtTilt,  TiltStep);
+			Ch.CurZoom  = StepLinear(Ch.CurZoom,  Ch.TgtZoom,  ZoomStep);
+			Ch.CurFocus = Ch.TgtFocus; // 포커스는 즉시
+		}
 
 		MirrorChannel(Ch);
 
@@ -577,10 +591,10 @@ bool UHucomsServerSubsystem::HandlePtzCentering(FHucomsChannel& Ch, const FHttpS
 	return true;
 }
 
-bool UHucomsServerSubsystem::HandleCapabilityPtz(FHucomsChannel& /*Ch*/, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
+bool UHucomsServerSubsystem::HandleCapabilityPtz(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
 {
 	// getPTZ / getCapabilitiesPTZAll 공통 - 클라이언트 파서는 '[' 헤더 줄을 건너뛴다.
-	static const TCHAR* Caps =
+	static const TCHAR* CapsPtz =
 		TEXT("[Capabilities PTZ]\n")
 		TEXT("PanSupported = Yes\n")
 		TEXT("TiltSupported = Yes\n")
@@ -592,7 +606,20 @@ bool UHucomsServerSubsystem::HandleCapabilityPtz(FHucomsChannel& /*Ch*/, const F
 		TEXT("AutopanSupported = No\n")
 		TEXT("AutopancwSupported = No\n")
 		TEXT("TourSupported = No\n");
-	OnComplete(MakeText(FString(Caps)));
+	// 고정형: 실기 고정형 CCTV 와 동일하게 PTZ 미지원으로 광고 — 클라이언트가 PTZ 조작 UI 를 숨길 수 있다.
+	static const TCHAR* CapsFixed =
+		TEXT("[Capabilities PTZ]\n")
+		TEXT("PanSupported = No\n")
+		TEXT("TiltSupported = No\n")
+		TEXT("ZoomSupported = No\n")
+		TEXT("FocusSupported = No\n")
+		TEXT("EndlessPanSupported = No\n")
+		TEXT("AutoFocusSupported = No\n")
+		TEXT("PresetSupported = 0\n")
+		TEXT("AutopanSupported = No\n")
+		TEXT("AutopancwSupported = No\n")
+		TEXT("TourSupported = No\n");
+	OnComplete(MakeText(FString(Ch.bFixed ? CapsFixed : CapsPtz)));
 	return true;
 }
 
@@ -658,6 +685,13 @@ bool UHucomsServerSubsystem::HandleTuning(FHucomsChannel& /*Ch*/, const FHttpSer
 //======================================================================================
 void UHucomsServerSubsystem::ApplyGoPtz(FHucomsChannel& Ch, const FHttpServerRequest& Req)
 {
+	// 고정형 카메라는 이동 명령(goptzfpos)을 무시한다 — 설치 자세로 고정.
+	// (getptzfpos 는 고정된 Cur 를 그대로 반환하므로 baro_calory 라운드트립은 유지된다.)
+	if (Ch.bFixed)
+	{
+		return;
+	}
+
 	// 절대 이동(go-to). 클라이언트는 panpos/tiltpos 항상, zoompos/focuspos 는 선택 전송.
 	if (HasQ(Req, TEXT("panpos")))   { Ch.TgtPan   = HucomsProtocol::WrapPan(GetQInt(Req, TEXT("panpos"), Ch.CurPan)); }
 	if (HasQ(Req, TEXT("tiltpos")))  { Ch.TgtTilt  = HucomsProtocol::ClampTilt(GetQInt(Req, TEXT("tiltpos"), Ch.CurTilt)); }
@@ -669,6 +703,12 @@ void UHucomsServerSubsystem::ApplyGoPtz(FHucomsChannel& Ch, const FHttpServerReq
 
 void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServerRequest& Req)
 {
+	// 고정형 카메라는 센터링(조준)도 무시한다 — 설치 자세로 고정.
+	if (Ch.bFixed)
+	{
+		return;
+	}
+
 	// 픽셀(1920x1080 논리 프레임) -> pan/tilt 델타. LINEAR 모델로 실기 펌웨어 재현.
 	// 기준은 '현재 위치(Cur)' - 실기는 지금 보고 있는 자세에서 센터링한다.
 	const FString Type = GetQ(Req, TEXT("type"), TEXT("point"));
