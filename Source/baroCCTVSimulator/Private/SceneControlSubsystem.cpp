@@ -205,6 +205,26 @@ namespace
 			}
 		}
 	}
+
+	// 한국 신형 번호판(앞 3자리 + 한글 + 뒤 4자리)으로 자릿수를 정규화한다.
+	// BP_Plate::Change_Text 파싱(Num_3=sub(0,3), Kor=sub(3), Num_4=sub(4,4))이 이 자릿수를 전제하므로
+	// 앞자리가 2자리면 Num_3 칸에 한글이 섞여 "###" 대신 "##한글"이 되어 유럽식처럼 쪼개진다.
+	// 저장값=렌더값 일치를 위해 spawn/patch 시 S 자체를 정규화한다(응답·웹UI 표시도 정규화값).
+	void NormalizeKoreanPlate(FSimCarState& S)
+	{
+		auto Digits = [](const FString& In, int32 Width)
+		{
+			FString D;
+			for (int32 i = 0; i < In.Len(); ++i) { if (FChar::IsDigit(In[i])) { D.AppendChar(In[i]); } }
+			if (D.Len() > Width) { D = D.Right(Width); }
+			while (D.Len() < Width) { D = FString(TEXT("0")) + D; }  // 부족분 좌측 0패딩(정상 입력이면 미발생)
+			return D;
+		};
+		S.Prefix = Digits(S.Prefix, 3);
+		S.Number = Digits(S.Number, 4);
+		const FString K = S.Kor.Left(1);
+		S.Kor = K.IsEmpty() ? FString(TEXT("가")) : K;
+	}
 }
 
 //======================================================================================
@@ -334,8 +354,8 @@ void USceneControlSubsystem::ApplyToActor(AActor* Car, const FSimCarState& S)
 	CallIntFn(Car, TEXT("Change_Car"), S.CarType);
 	CallIntFn(Car, TEXT("Change_Color"), S.Color);
 	CallIntFn(Car, TEXT("Change_Plate"), S.PlateType);
-	// 번호판 글자 (BP_Plate::Change_Text 파싱: Num_3=sub(0,3), Kor=sub(3), Num_4=sub(4,4)).
-	// 정확한 조합 규칙은 실렌더 검증에서 튜닝 — 우선 앞자리+한글+뒤4자리를 연결해 넘긴다.
+	// 번호판 글자. 한국 신형(앞3자리+한글+뒤4자리)으로 정규화된 S 를 "###가####" 로 연결해 넘긴다.
+	// (BP_Plate::Change_Text 파싱: Num_3=sub(0,3), Kor=sub(3), Num_4=sub(4,4) — NormalizeKoreanPlate 참조.)
 	const FString PlateStr = S.Prefix + S.Kor + S.Number;
 	SetPlateTextOnChildren(Car, PlateStr);
 }
@@ -470,6 +490,7 @@ bool USceneControlSubsystem::HandleCars(const FHttpServerRequest& Req, const FHt
 	S.Id = FString::Printf(TEXT("car-%02d"), ++CarSeq);
 	S.Transform = Xform;
 	S.Actor = Car;
+	NormalizeKoreanPlate(S);
 	ApplyToActor(Car, S);
 
 	Cars.Add(S.Id, S);
@@ -548,6 +569,7 @@ bool USceneControlSubsystem::HandleCarById(const FHttpServerRequest& Req, const 
 		}
 	}
 
+	NormalizeKoreanPlate(*S);
 	if (AActor* A = S->Actor.Get()) { ApplyToActor(A, *S); }
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
