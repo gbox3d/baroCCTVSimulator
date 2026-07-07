@@ -3,6 +3,8 @@
 주차장 CCTV PTZ 카메라를 언리얼 안에서 "실기(Hucoms)처럼" 행세시키는 재사용 가능한 런타임 플러그인.
 `baro_calory`(Node/Python AI 에이전트)가 실기 IP 대신 이 시뮬레이터에 붙어 동일 프로토콜로 동작하도록 한다.
 
+> 📖 **통신 프로토콜·사용법**: [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) · **프로젝트 셋업(submodule)**: [`docs/INTEGRATION.md`](docs/INTEGRATION.md)
+
 ## 목차
 
 - [무엇인가](#무엇인가)
