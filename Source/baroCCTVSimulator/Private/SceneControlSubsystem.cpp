@@ -48,7 +48,7 @@ namespace
 		{ TEXT("블루"),   0.15f, 0.22f, 0.60f },
 	};
 
-	struct FSlotInfo { FString Id; FString Type; FTransform Xform; };
+	struct FSlotInfo { FString Id; FString Label; FString Type; FTransform Xform; };
 
 	FString SerializeJson(const TSharedRef<FJsonObject>& Obj)
 	{
@@ -156,6 +156,47 @@ namespace
 		return S.IsEmpty() ? TEXT("slot") : S;
 	}
 
+	bool NaturalLess(const FString& A, const FString& B)
+	{
+		int32 IA = 0;
+		int32 IB = 0;
+		while (IA < A.Len() && IB < B.Len())
+		{
+			const bool bDigitA = FChar::IsDigit(A[IA]);
+			const bool bDigitB = FChar::IsDigit(B[IB]);
+			if (bDigitA && bDigitB)
+			{
+				uint64 NA = 0;
+				uint64 NB = 0;
+				int32 DigitsA = 0;
+				int32 DigitsB = 0;
+				while (IA < A.Len() && FChar::IsDigit(A[IA]))
+				{
+					NA = NA * 10 + uint64(A[IA] - TCHAR('0'));
+					++IA;
+					++DigitsA;
+				}
+				while (IB < B.Len() && FChar::IsDigit(B[IB]))
+				{
+					NB = NB * 10 + uint64(B[IB] - TCHAR('0'));
+					++IB;
+					++DigitsB;
+				}
+				if (NA != NB) { return NA < NB; }
+				if (DigitsA != DigitsB) { return DigitsA < DigitsB; }
+				continue;
+			}
+			if (bDigitA != bDigitB) { return bDigitA; }
+
+			const TCHAR CA = FChar::ToLower(A[IA]);
+			const TCHAR CB = FChar::ToLower(B[IB]);
+			if (CA != CB) { return CA < CB; }
+			++IA;
+			++IB;
+		}
+		return A.Len() < B.Len();
+	}
+
 	void CollectSlots(UWorld* World, const FString& Prefix, TArray<FSlotInfo>& Out)
 	{
 		if (!World) { return; }
@@ -166,12 +207,18 @@ namespace
 			const FString CN = A->GetClass()->GetName();
 			if (!CN.StartsWith(Prefix)) { continue; }
 			FSlotInfo S;
-			S.Id = A->GetName();                       // 배치 액터의 오브젝트명 = 안정 id(쿠킹 후 유지). GetActorLabel 은 에디터 전용이라 금지.
+			S.Id = A->GetName();                       // 배치 액터의 오브젝트명 = 안정 id(쿠킹 후 유지).
+#if WITH_EDITOR
+			S.Label = A->GetActorLabel();              // 에디터 Outliner 표시명. RPC 키로 쓰지 않고 UI 표시용으로만 노출.
+#else
+			S.Label = S.Id;                            // 패키지/런타임 빌드는 ActorLabel API가 없으므로 안정 id로 폴백.
+#endif
+			if (S.Label.IsEmpty()) { S.Label = S.Id; }
 			S.Type = SlotTypeFromClass(CN, Prefix);
 			S.Xform = A->GetActorTransform();
 			Out.Add(S);
 		}
-		Out.Sort([](const FSlotInfo& A, const FSlotInfo& B) { return A.Id < B.Id; });
+		Out.Sort([](const FSlotInfo& A, const FSlotInfo& B) { return NaturalLess(A.Label, B.Label); });
 	}
 
 	bool SetIntProp(UObject* Obj, const TCHAR* Name, int32 Val)
@@ -509,6 +556,7 @@ bool USceneControlSubsystem::HandleSlots(const FHttpServerRequest& /*Req*/, cons
 	{
 		TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
 		O->SetStringField(TEXT("id"), S.Id);
+		O->SetStringField(TEXT("label"), S.Label);
 		O->SetStringField(TEXT("type"), S.Type);
 		O->SetObjectField(TEXT("transform"), TransformToJson(S.Xform));
 		const FString* CarId = SlotOccupancy.Find(S.Id);
