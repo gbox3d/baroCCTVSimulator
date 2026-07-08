@@ -13,6 +13,8 @@
 // 계약(엔드포인트):
 //   GET    /scene/catalog        차종수·색상·번호판종류·한글목록
 //   GET    /scene/slots          주차면(id·type·transform·occupied·carId)
+//   GET    /scene/cameras        카메라 광학 포즈(CameraComp 월드)+FOV+해상도+PTZ+포트 (오버레이 투영 파라미터)
+//   POST   /scene/project        월드점→픽셀 그라운드-트루스(UE 뷰·투영행렬; 웹 오버레이 정합 검증 오라클)
 //   GET    /scene/cars           배치된 차량
 //   POST   /scene/cars           스폰 {slotId,carType,color,plate}
 //   GET|PATCH|DELETE /scene/cars/:id
@@ -86,6 +88,8 @@ private:
 	// --- 라우트 핸들러 ---
 	bool HandleCatalog(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 	bool HandleSlots(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
+	bool HandleCameras(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);   // 카메라 포즈+FOV+포트
+	bool HandleProject(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);   // 월드점→픽셀 오라클
 	bool HandleCars(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);      // GET list / POST spawn
 	bool HandleCarById(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);   // GET / PATCH / DELETE
 	bool HandleReset(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);

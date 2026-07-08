@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
 #include "HucomsServerSubsystem.h"
+#include "Interfaces/IPluginManager.h"   // .uplugin VersionName — HUD 에 플러그인 버전 표시
 
 void ABaroSimHUD::DrawHUD()
 {
@@ -27,7 +28,9 @@ void ABaroSimHUD::DrawHUD()
 	const float X = 40.f;
 	float Y = 40.f;
 
-	DrawText(TEXT("baroCCTVSimulator — CCTV 시뮬레이터"), FLinearColor::White, X, Y, GEngine->GetLargeFont(), 1.6f);
+	FString PluginVer = TEXT("?");
+	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("baroCCTVSimulator"))) { PluginVer = Plugin->GetDescriptor().VersionName; }
+	DrawText(FString::Printf(TEXT("baroCCTVSimulator v%s — CCTV 시뮬레이터"), *PluginVer), FLinearColor::White, X, Y, GEngine->GetLargeFont(), 1.6f);
 	Y += 48.f;
 	DrawText(FString::Printf(TEXT("Hucoms 채널 %d개 서빙 중  ·  HTTP %d~  ·  MJPEG %d~"),
 		ChannelCount, HttpBase, MjpegBase), FLinearColor(0.7f, 0.85f, 1.f), X, Y, GEngine->GetMediumFont(), 1.2f);

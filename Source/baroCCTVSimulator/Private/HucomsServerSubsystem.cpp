@@ -453,6 +453,21 @@ TArray<FString> UHucomsServerSubsystem::GetChannelStatusLines() const
 	return Lines;
 }
 
+bool UHucomsServerSubsystem::GetCameraPorts(const APTZCamera* Cam, int32& OutHttpPort, int32& OutMjpegPort) const
+{
+	if (!Cam) { return false; }
+	for (const TSharedPtr<FHucomsChannel>& ChPtr : Channels)
+	{
+		if (ChPtr.IsValid() && ChPtr->Camera.Get() == Cam)
+		{
+			OutHttpPort = ChPtr->HttpPort;
+			OutMjpegPort = ChPtr->MjpegPort;
+			return true;
+		}
+	}
+	return false;
+}
+
 //======================================================================================
 // Camera configure / mirror / capture
 //======================================================================================

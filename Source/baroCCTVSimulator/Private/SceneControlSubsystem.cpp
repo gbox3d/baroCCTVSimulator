@@ -13,6 +13,13 @@
 #include "Components/ChildActorComponent.h"
 #include "UObject/UnrealType.h"              // FIntProperty, FindFProperty
 
+#include "PTZCamera.h"                        // APTZCamera (오버레이 투영 대상 카메라)
+#include "HucomsServerSubsystem.h"           // 카메라 실효 포트 조회(GetCameraPorts)
+#include "Camera/CameraComponent.h"          // UCameraComponent (광학 포즈)
+#include "Camera/CameraTypes.h"              // FMinimalViewInfo, ECameraProjectionMode
+#include "Kismet/GameplayStatics.h"          // GetViewProjectionMatrix
+#include "Interfaces/IPluginManager.h"       // .uplugin VersionName 런타임 조회(플러그인 버전 노출)
+
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonSerializer.h"
@@ -225,6 +232,86 @@ namespace
 		const FString K = S.Kor.Left(1);
 		S.Kor = K.IsEmpty() ? FString(TEXT("가")) : K;
 	}
+
+	//----------------------------------------------------------------------------------
+	// 오버레이 투영: 카메라 열거 / 카메라→JSON / 월드점→픽셀(그라운드-트루스)
+	//----------------------------------------------------------------------------------
+	struct FCamEntry { APTZCamera* Cam = nullptr; int32 Http = 0; int32 Mjpeg = 0; };
+
+	// 레벨의 APTZCamera 를 열거하고 각 카메라의 실효 Hucoms 포트를 채워 이름순 정렬.
+	void CollectCameras(UWorld* World, TArray<FCamEntry>& Out)
+	{
+		if (!World) { return; }
+		UHucomsServerSubsystem* Hu = World->GetSubsystem<UHucomsServerSubsystem>();
+		for (TActorIterator<APTZCamera> It(World); It; ++It)
+		{
+			APTZCamera* C = *It;
+			if (!C) { continue; }
+			FCamEntry E; E.Cam = C; E.Http = C->HucomsHttpPort; E.Mjpeg = C->HucomsMjpegPort;
+			int32 H = 0, M = 0;
+			if (Hu && Hu->GetCameraPorts(C, H, M)) { E.Http = H; E.Mjpeg = M; }  // 채널이 실제 바인딩한 포트 우선
+			Out.Add(E);
+		}
+		Out.Sort([](const FCamEntry& A, const FCamEntry& B) { return A.Cam->GetName() < B.Cam->GetName(); });
+	}
+
+	// 광학 포즈 = CameraComp 월드 트랜스폼(pan/tilt 가 이미 구워진, 씬캡처가 실제 렌더하는 시점).
+	FTransform CameraOpticalTransform(const APTZCamera* C)
+	{
+		if (C && C->CameraComp) { return C->CameraComp->GetComponentTransform(); }
+		return C ? C->GetActorTransform() : FTransform::Identity;
+	}
+
+	// 오버레이 투영에 필요한 것 중 "Hucoms 로 재현 불가능한" 부분만 노출한다 = 외부 파라미터(extrinsic).
+	//   mount.location : 광학중심 월드 위치. 피벗이 Root 와 동일위치(레버암 0)라 pan/tilt 에 불변 = 고정.
+	//   mount.baseYaw  : 설치 방위(pan=0 기준 yaw). 광학 yaw = baseYaw + CurrentPan 이므로 역산.
+	//   wideHFovDeg    : 1x 수평 FOV(hfovFromZoomPos 스케일 기준).
+	// FOV·PTZ 는 실카메라와 동일하게 Hucoms(getptzfpos + zoompos)에서 가져온다 → 여기서 중복 노출하지 않음.
+	TSharedRef<FJsonObject> CameraToJson(const FCamEntry& E)
+	{
+		APTZCamera* C = E.Cam;
+		const FTransform X = CameraOpticalTransform(C);
+		const FVector Loc = X.GetLocation();
+		const double BaseYaw = X.Rotator().Yaw - C->GetCurrentPan();
+
+		TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("id"), C->GetName());
+		O->SetNumberField(TEXT("hucomsPort"), E.Http);
+		O->SetNumberField(TEXT("mjpegPort"), E.Mjpeg);
+		O->SetBoolField(TEXT("fixed"), C->bFixedMode);
+
+		TSharedRef<FJsonObject> Mount = MakeShared<FJsonObject>();
+		TSharedRef<FJsonObject> L = MakeShared<FJsonObject>();
+		L->SetNumberField(TEXT("x"), Loc.X); L->SetNumberField(TEXT("y"), Loc.Y); L->SetNumberField(TEXT("z"), Loc.Z);
+		Mount->SetObjectField(TEXT("location"), L);
+		Mount->SetNumberField(TEXT("baseYaw"), BaseYaw);
+		O->SetObjectField(TEXT("mount"), Mount);
+
+		O->SetNumberField(TEXT("wideHFovDeg"), C->BaseFOV);
+		return O;
+	}
+
+	// UE 실제 뷰·투영행렬로 월드점→픽셀(FSceneView::ProjectWorldToScreen 과 동일 매핑).
+	TSharedRef<FJsonValue> ProjectPointJson(const FMatrix& VP, const FVector& P, int32 W, int32 H)
+	{
+		const FVector4 R = VP.TransformFVector4(FVector4(P, 1.f));
+		TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
+		const bool bBehind = (R.W <= KINDA_SMALL_NUMBER);
+		bool bVisible = false;
+		double X = 0.0, Y = 0.0;
+		if (!bBehind)
+		{
+			const double Nx = R.X / R.W, Ny = R.Y / R.W;
+			X = (Nx * 0.5 + 0.5) * W;
+			Y = (0.5 - Ny * 0.5) * H;                       // NDC Y up -> 픽셀 Y down
+			bVisible = (X >= 0 && X <= W && Y >= 0 && Y <= H);
+		}
+		O->SetNumberField(TEXT("x"), X);
+		O->SetNumberField(TEXT("y"), Y);
+		O->SetBoolField(TEXT("visible"), bVisible);
+		O->SetBoolField(TEXT("behind"), bBehind);
+		return MakeShared<FJsonValueObject>(O);
+	}
 }
 
 //======================================================================================
@@ -280,6 +367,8 @@ void USceneControlSubsystem::StartServer()
 	using EV = EHttpServerRequestVerbs;
 	Bind(TEXT("/scene/catalog"),   EV::VERB_GET, &USceneControlSubsystem::HandleCatalog);
 	Bind(TEXT("/scene/slots"),     EV::VERB_GET, &USceneControlSubsystem::HandleSlots);
+	Bind(TEXT("/scene/cameras"),   EV::VERB_GET, &USceneControlSubsystem::HandleCameras);
+	Bind(TEXT("/scene/project"),   EV::VERB_POST, &USceneControlSubsystem::HandleProject);
 	Bind(TEXT("/scene/cars"),      EV::VERB_GET | EV::VERB_POST, &USceneControlSubsystem::HandleCars);
 	Bind(TEXT("/scene/cars/:id"),  EV::VERB_GET | EV::VERB_PATCH | EV::VERB_DELETE, &USceneControlSubsystem::HandleCarById);
 	Bind(TEXT("/scene/reset"),     EV::VERB_POST, &USceneControlSubsystem::HandleReset);
@@ -369,6 +458,12 @@ bool USceneControlSubsystem::HandleCatalog(const FHttpServerRequest& /*Req*/, co
 	FString Level;
 	if (UWorld* W = GetWorld()) { Level = W->GetMapName(); Level.RemoveFromStart(W->StreamingLevelsPrefix); }
 	O->SetStringField(TEXT("level"), Level);
+
+	// 플러그인 버전 — .uplugin VersionName 을 단일 소스로 읽어 노출(웹 /simulator 에서 확인용).
+	FString PluginVer = TEXT("?");
+	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("baroCCTVSimulator"))) { PluginVer = Plugin->GetDescriptor().VersionName; }
+	O->SetStringField(TEXT("pluginVersion"), PluginVer);
+
 	O->SetNumberField(TEXT("carCount"), 23);
 
 	TArray<TSharedPtr<FJsonValue>> Colors;
@@ -424,6 +519,88 @@ bool USceneControlSubsystem::HandleSlots(const FHttpServerRequest& /*Req*/, cons
 	}
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetArrayField(TEXT("slots"), Arr);
+	OnComplete(JsonResp(Root));
+	return true;
+}
+
+bool USceneControlSubsystem::HandleCameras(const FHttpServerRequest& /*Req*/, const FHttpResultCallback& OnComplete)
+{
+	TArray<FCamEntry> Cams;
+	CollectCameras(GetWorld(), Cams);
+
+	TArray<TSharedPtr<FJsonValue>> Arr;
+	for (const FCamEntry& E : Cams) { Arr.Add(MakeShared<FJsonValueObject>(CameraToJson(E))); }
+
+	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetArrayField(TEXT("cameras"), Arr);
+	OnComplete(JsonResp(Root));
+	return true;
+}
+
+bool USceneControlSubsystem::HandleProject(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
+{
+	TSharedPtr<FJsonObject> Body = ParseBody(Req);
+	if (!Body.IsValid()) { OnComplete(JsonError(EHttpServerResponseCodes::BadRequest, TEXT("JSON 파싱 실패"))); return true; }
+
+	// 카메라 선택: cameraId(액터명) 우선, 없으면 hucomsPort. 둘 다 없으면 첫 카메라.
+	FString CamId; Body->TryGetStringField(TEXT("cameraId"), CamId);
+	int32 WantPort = 0; const bool bHasPort = Body->TryGetNumberField(TEXT("hucomsPort"), WantPort);
+
+	TArray<FCamEntry> Cams;
+	CollectCameras(GetWorld(), Cams);
+	const FCamEntry* Found = Cams.FindByPredicate([&](const FCamEntry& E)
+	{
+		if (!CamId.IsEmpty()) { return E.Cam->GetName() == CamId; }
+		if (bHasPort) { return E.Http == WantPort; }
+		return false;
+	});
+	if (!Found && Cams.Num() > 0 && CamId.IsEmpty() && !bHasPort) { Found = &Cams[0]; }
+	if (!Found) { OnComplete(JsonError(EHttpServerResponseCodes::NotFound, TEXT("카메라를 찾을 수 없습니다(cameraId/hucomsPort)"))); return true; }
+
+	// 해상도(선택) — 없으면 논리 1920x1080. 수평 FOV + 종횡비로 뷰·투영행렬을 구성한다.
+	int32 W = 1920, H = 1080;
+	const TSharedPtr<FJsonObject>* ResObj;
+	if (Body->TryGetObjectField(TEXT("resolution"), ResObj))
+	{
+		int32 rw = 0, rh = 0;
+		if ((*ResObj)->TryGetNumberField(TEXT("width"), rw) && rw > 0) { W = rw; }
+		if ((*ResObj)->TryGetNumberField(TEXT("height"), rh) && rh > 0) { H = rh; }
+	}
+
+	APTZCamera* Cam = Found->Cam;
+	FMinimalViewInfo View;
+	const FTransform X = CameraOpticalTransform(Cam);
+	View.Location = X.GetLocation();
+	View.Rotation = X.Rotator();
+	View.FOV = Cam->GetCurrentFOV();                     // 수평 FOV
+	View.AspectRatio = (float)W / (float)H;
+	View.bConstrainAspectRatio = true;
+	View.ProjectionMode = ECameraProjectionMode::Perspective;
+
+	FMatrix ViewM, ProjM, VP;
+	UGameplayStatics::GetViewProjectionMatrix(View, ViewM, ProjM, VP);
+
+	TArray<TSharedPtr<FJsonValue>> OutPts;
+	const TArray<TSharedPtr<FJsonValue>>* Pts;
+	if (Body->TryGetArrayField(TEXT("points"), Pts))
+	{
+		for (const TSharedPtr<FJsonValue>& V : *Pts)
+		{
+			const TSharedPtr<FJsonObject> PO = V->AsObject();
+			if (!PO.IsValid()) { continue; }
+			double x = 0, y = 0, z = 0;
+			PO->TryGetNumberField(TEXT("x"), x); PO->TryGetNumberField(TEXT("y"), y); PO->TryGetNumberField(TEXT("z"), z);
+			OutPts.Add(ProjectPointJson(VP, FVector(x, y, z), W, H));
+		}
+	}
+
+	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("cameraId"), Cam->GetName());
+	Root->SetNumberField(TEXT("fovDeg"), Cam->GetCurrentFOV());
+	TSharedRef<FJsonObject> Res = MakeShared<FJsonObject>();
+	Res->SetNumberField(TEXT("width"), W); Res->SetNumberField(TEXT("height"), H);
+	Root->SetObjectField(TEXT("resolution"), Res);
+	Root->SetArrayField(TEXT("points"), OutPts);
 	OnComplete(JsonResp(Root));
 	return true;
 }

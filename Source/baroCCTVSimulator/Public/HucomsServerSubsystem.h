@@ -200,6 +200,13 @@ public:
 	/** 채널별 상태 한 줄씩(카메라·포트·실측 스트림 fps·클라이언트 수) — sim HUD 표시용. */
 	TArray<FString> GetChannelStatusLines() const;
 
+	/**
+	 * 이 카메라에 실제로 바인딩된 Hucoms 포트(HTTP/MJPEG)를 반환. 채널이 바인딩한 실효 포트가
+	 * 진실의 출처라, SceneControl 의 /scene/cameras 가 이 값으로 baro_calory device.port 와 조인한다
+	 * (자동 포트 부여 규칙을 다른 서브시스템이 중복 계산하지 않도록). 채널 없으면 false.
+	 */
+	bool GetCameraPorts(const APTZCamera* Cam, int32& OutHttpPort, int32& OutMjpegPort) const;
+
 private:
 	bool bServersStarted = false;
 	bool bAutoSpawnAttempted = false;
