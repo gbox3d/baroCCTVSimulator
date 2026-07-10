@@ -11,7 +11,8 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"                     // TActorIterator
 #include "Components/ChildActorComponent.h"
-#include "UObject/UnrealType.h"              // FIntProperty, FindFProperty
+#include "UObject/UnrealType.h"              // FIntProperty, FArrayProperty, FindFProperty, FScriptArrayHelper
+#include "UObject/SoftObjectPath.h"          // FSoftObjectPath::GetAssetName (Mesh_List 가 soft 참조일 때)
 
 #include "PTZCamera.h"                        // APTZCamera (오버레이 투영 대상 카메라)
 #include "HucomsServerSubsystem.h"           // 카메라 실효 포트 조회(GetCameraPorts)
@@ -219,6 +220,55 @@ namespace
 			Out.Add(S);
 		}
 		Out.Sort([](const FSlotInfo& A, const FSlotInfo& B) { return NaturalLess(A.Label, B.Label); });
+	}
+
+	// --- 차종 목록 ---
+	// BP_Car 의 Mesh_List(StaticMesh 배열) 원소 순서가 selected_Car 인덱스의 유일한 진실이다
+	// (Change_Car = Array_Get(Mesh_List, selected_Car) -> SetStaticMesh). 이름을 C++ 에 베끼면
+	// BP 에서 차를 추가·재정렬하는 순간 조용히 어긋나므로, CDO 를 리플렉션으로 읽어 그대로 노출한다.
+	const TCHAR* CarMeshListProp = TEXT("Mesh_List");
+
+	// Mesh_List 를 못 읽었을 때만 쓰는 과거 값(2026-07-07 실측). 이름 없이 인덱스만 노출된다.
+	constexpr int32 LegacyCarCount = 23;
+
+	// 에셋명 -> 표시명. "현대_쏘나타" -> "현대 쏘나타", "기아_봉고_탑차" -> "기아 봉고 탑차".
+	FString CarAssetToDisplayName(const FString& AssetName)
+	{
+		return AssetName.Replace(TEXT("_"), TEXT(" "));
+	}
+
+	// 실패 시 false + Out 비움. 성공 시 Out[i] = 인덱스 i 의 에셋명.
+	bool CollectCarAssetNames(UClass* CarCls, TArray<FString>& Out)
+	{
+		Out.Reset();
+		if (!CarCls) { return false; }
+		UObject* CDO = CarCls->GetDefaultObject();
+		FArrayProperty* Arr = FindFProperty<FArrayProperty>(CarCls, CarMeshListProp);
+		if (!CDO || !Arr) { return false; }
+
+		// FSoftObjectProperty 는 FObjectPropertyBase 를 상속하므로 soft 를 먼저 본다.
+		FSoftObjectProperty* SoftInner = CastField<FSoftObjectProperty>(Arr->Inner);
+		FObjectPropertyBase* HardInner = CastField<FObjectPropertyBase>(Arr->Inner);
+		if (!SoftInner && !HardInner) { return false; }
+
+		FScriptArrayHelper Helper(Arr, Arr->ContainerPtrToValuePtr<void>(CDO));
+		const int32 N = Helper.Num();
+		Out.Reserve(N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			const uint8* Elem = Helper.GetRawPtr(i);
+			if (SoftInner)
+			{
+				// soft 참조면 메시를 로드하지 않고 경로에서 이름만 취한다.
+				Out.Add(SoftInner->GetPropertyValue(Elem).ToSoftObjectPath().GetAssetName());
+			}
+			else
+			{
+				const UObject* Mesh = HardInner->GetObjectPropertyValue(Elem);
+				Out.Add(Mesh ? Mesh->GetName() : FString());
+			}
+		}
+		return N > 0;
 	}
 
 	bool SetIntProp(UObject* Obj, const TCHAR* Name, int32 Val)
@@ -470,6 +520,26 @@ UClass* USceneControlSubsystem::ResolveCarClass()
 	return CarClass;
 }
 
+const TArray<FString>& USceneControlSubsystem::GetCarAssetNames()
+{
+	if (!bCarAssetNamesResolved)
+	{
+		bCarAssetNamesResolved = true;
+		// ResolveCarClass() 가 BP_Car 를 로드한다 — 첫 스폰 히치가 이 시점으로 앞당겨질 뿐이다.
+		if (!CollectCarAssetNames(ResolveCarClass(), CarAssetNames))
+		{
+			UE_LOG(LogSceneCtrl, Warning, TEXT("[Scene] BP_Car.%s 읽기 실패 — 차종명 없이 인덱스만 노출한다."), CarMeshListProp);
+		}
+	}
+	return CarAssetNames;
+}
+
+int32 USceneControlSubsystem::ClampCarType(int32 InCarType)
+{
+	const int32 N = GetCarAssetNames().Num();
+	return FMath::Clamp(InCarType, 0, (N > 0 ? N : LegacyCarCount) - 1);
+}
+
 AActor* USceneControlSubsystem::SpawnCarActor(const FTransform& Xform)
 {
 	UWorld* World = GetWorld();
@@ -511,7 +581,20 @@ bool USceneControlSubsystem::HandleCatalog(const FHttpServerRequest& /*Req*/, co
 	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("baroCCTVSimulator"))) { PluginVer = Plugin->GetDescriptor().VersionName; }
 	O->SetStringField(TEXT("pluginVersion"), PluginVer);
 
-	O->SetNumberField(TEXT("carCount"), 23);
+	// 차종: BP_Car.Mesh_List 를 읽어 index/name/asset 을 싣는다. carCount 는 그 길이(구 계약 유지).
+	const TArray<FString>& CarAssets = GetCarAssetNames();
+	O->SetNumberField(TEXT("carCount"), CarAssets.Num() > 0 ? CarAssets.Num() : LegacyCarCount);
+
+	TArray<TSharedPtr<FJsonValue>> CarsJson;
+	for (int32 i = 0; i < CarAssets.Num(); ++i)
+	{
+		TSharedRef<FJsonObject> C = MakeShared<FJsonObject>();
+		C->SetNumberField(TEXT("index"), i);
+		C->SetStringField(TEXT("name"), CarAssetToDisplayName(CarAssets[i]));
+		C->SetStringField(TEXT("asset"), CarAssets[i]);
+		CarsJson.Add(MakeShared<FJsonValueObject>(C));
+	}
+	O->SetArrayField(TEXT("cars"), CarsJson);
 
 	TArray<TSharedPtr<FJsonValue>> Colors;
 	for (int32 i = 0; i < UE_ARRAY_COUNT(ColorDefs); ++i)
@@ -674,7 +757,7 @@ bool USceneControlSubsystem::HandleCars(const FHttpServerRequest& Req, const FHt
 	int32 CarType = 0, Color = 0;
 	Body->TryGetNumberField(TEXT("carType"), CarType);
 	Body->TryGetNumberField(TEXT("color"), Color);
-	S.CarType = FMath::Clamp(CarType, 0, 22);
+	S.CarType = ClampCarType(CarType);
 	S.Color = FMath::Clamp(Color, 0, 7);
 
 	const TSharedPtr<FJsonObject>* PlateObj;
@@ -757,7 +840,7 @@ bool USceneControlSubsystem::HandleCarById(const FHttpServerRequest& Req, const 
 	if (!Body.IsValid()) { OnComplete(JsonError(EHttpServerResponseCodes::BadRequest, TEXT("JSON 파싱 실패"))); return true; }
 
 	int32 Tmp;
-	if (Body->TryGetNumberField(TEXT("carType"), Tmp)) { S->CarType = FMath::Clamp(Tmp, 0, 22); }
+	if (Body->TryGetNumberField(TEXT("carType"), Tmp)) { S->CarType = ClampCarType(Tmp); }
 	if (Body->TryGetNumberField(TEXT("color"), Tmp)) { S->Color = FMath::Clamp(Tmp, 0, 7); }
 	const TSharedPtr<FJsonObject>* PlateObj;
 	if (Body->TryGetObjectField(TEXT("plate"), PlateObj))

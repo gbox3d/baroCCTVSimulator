@@ -11,7 +11,7 @@
 // 비틱) 별도 UWorldSubsystem 으로 분리한다. 포트 8095 는 baro_calory config.simulator.port 와 일치.
 //
 // 계약(엔드포인트):
-//   GET    /scene/catalog        차종수·색상·번호판종류·한글목록
+//   GET    /scene/catalog        차종목록(index·name·asset)·색상·번호판종류·한글목록
 //   GET    /scene/slots          주차면(id·label·type·transform·occupied·carId)
 //   GET    /scene/cameras        카메라 광학 포즈(CameraComp 월드)+FOV+해상도+PTZ+포트 (오버레이 투영 파라미터)
 //   POST   /scene/project        월드점→픽셀 그라운드-트루스(UE 뷰·투영행렬; 웹 오버레이 정합 검증 오라클)
@@ -76,6 +76,10 @@ private:
 	UPROPERTY()
 	TSubclassOf<AActor> CarClass;
 
+	/** BP_Car.Mesh_List 에서 읽은 차종 에셋명. 배열 인덱스 = selected_Car. 최초 요청 시 1회 채운다. */
+	TArray<FString> CarAssetNames;
+	bool bCarAssetNamesResolved = false;   // 실패해도 재시도·경고 반복을 막는다
+
 	TSharedPtr<IHttpRouter> Router;
 	TArray<FHttpRouteHandle> Routes;
 
@@ -96,6 +100,10 @@ private:
 
 	// --- 내부 ---
 	UClass* ResolveCarClass();
+	/** 차종 에셋명(BP_Car.Mesh_List). 실패하면 빈 배열 — 호출부는 인덱스만 노출한다. */
+	const TArray<FString>& GetCarAssetNames();
+	/** carType 을 실제 Mesh_List 길이로 클램프. Mesh_List 를 못 읽으면 과거 범위(0..22). */
+	int32 ClampCarType(int32 InCarType);
 	AActor* SpawnCarActor(const FTransform& Xform);
 	void ApplyToActor(AActor* Car, const FSimCarState& S);   // BP setter 호출(Change_Car/Color/Plate/Text)
 };

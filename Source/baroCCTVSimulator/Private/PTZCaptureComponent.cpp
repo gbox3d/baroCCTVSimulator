@@ -60,6 +60,13 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		CaptureComp->bCaptureOnMovement = false;
 		// 단발 캡처 사이 노출/TAA 히스토리 유지 — 없으면 첫 캡처 노출이 망가진다.
 		CaptureComp->bAlwaysPersistRenderingState = true;
+		// 버추얼 텍스처(SVT) 페이지 스트리밍은 렌더 픽셀의 피드백으로 굴러가는데, 이 sim 은
+		// bDisableWorldRendering 으로 메인 뷰포트를 끄고 SceneCapture 만 돌린다. 캡처의 VT
+		// 피드백은 스로틀에 막혀 페이지가 안 올라오고(부팅별 복불복·-RenderOffscreen 은 상시),
+		// VT 데칼(주차면 라인 MI_Decal_Line_Road_White_02 등)만 투명해진다(2026-07-09 실측:
+		// r.VirtualTextures=0 강제 시 동일 증상 재현). 엔진이 캡처 전용 시나리오용으로 제공하는
+		// 스로틀 해제 플래그가 정답이다.
+		CaptureComp->bOverrideVirtualTextureThrottle = true;
 		// 정지 사진에 팬 모션블러가 섞이면 가독성만 해친다.
 		CaptureComp->ShowFlags.SetMotionBlur(false);
 		// 선명도(적대적 검증 결론): 단발 SceneCapture 는 뷰포트의 TSR 시간축 누적(초해상도+샤픈)이
