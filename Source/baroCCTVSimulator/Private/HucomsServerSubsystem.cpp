@@ -753,14 +753,16 @@ void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServe
 
 	// 델타 환산은 '현재 줌의 실효 FOV' 기준 — 광각 상수를 그대로 쓰면 화면상 같은 클릭
 	// 오프셋이 줌 배율만큼 과이동한다(예: 10x 줌에서 10배 오버슈트로 엉뚱한 곳을 조준).
-	// HFOV 는 실측 캘리브레이션 표(ZoomPosToHFov), VFOV 는 rectilinear 광학상 tan 비례 축소.
+	// 세로 FOV 는 인자로 넘기지 않는다: rectilinear 광학은 가로·세로가 같은 초점거리 하나를
+	// 공유하고(실기 실측에서 팬/틸트로 역산한 초점거리가 0.1% 이내 일치), 옛 WideVFovDeg 는
+	// 선형 모델의 유물이라 그걸 쓰는 순간 세로가 30% 빗나갔다.
 	const float CurHFov = HucomsProtocol::ZoomPosToHFov(Ch.CurZoom, WideHFovDeg);
-	const float Zf      = HucomsProtocol::HFovToZoomFactor(CurHFov, WideHFovDeg);
-	const float CurVFov = FMath::RadiansToDegrees(2.f * FMath::Atan(
-		FMath::Tan(FMath::DegreesToRadians(WideVFovDeg) * 0.5f) / FMath::Max(Zf, KINDA_SMALL_NUMBER)));
 
+	// 현재 틸트를 함께 넘긴다 — 팬 축이 월드 수직축이라 광축이 기울면 조준 기하가 달라진다
+	// (가로 클릭에도 틸트가 조금 딸려 움직인다). 실기가 정확히 그렇게 동작한다.
 	int32 PanDeltaCd, TiltDeltaCd;
-	HucomsProtocol::PixelToDeltaCentideg(PixelX, PixelY, CurHFov, CurVFov, PanDeltaCd, TiltDeltaCd);
+	HucomsProtocol::PixelToDeltaCentideg(PixelX, PixelY, CurHFov, Ch.CurTilt / 100.f,
+		PanDeltaCd, TiltDeltaCd, SetCenterFocalGain);
 
 	Ch.TgtPan  = HucomsProtocol::WrapPan(Ch.CurPan + PanDeltaCd);
 	// 실기 setcenter 규약(fov-convert.mjs ptzToWidePixel, cam-001 필드검증): 프레임에서 아래(y+)에

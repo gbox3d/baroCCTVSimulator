@@ -86,13 +86,25 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Server")
 	int32 BaseMjpegPort = 8091;
 
-	/** wide 프리셋(zoompos 0)에서의 수평 FOV(deg). 실측값 69.88. setcenter LINEAR 모델의 기준. */
+	/**
+	 * wide 프리셋(zoompos 0)에서의 수평 FOV(deg). 실측값 57.14 (cam-001, 2026-07-14).
+	 * 옛 값 69.88 은 "픽셀↔각도는 선형"이라는 틀린 가정으로 역산된 유물이라 22% 넓었다.
+	 * 세로 FOV 는 별도 상수를 두지 않는다 — rectilinear 광학에서 종횡비로 유도되는 값이고,
+	 * 옛 WideVFovDeg(30.48) 역시 같은 선형 모델의 유물이었다(그래서 세로가 30%나 빗나갔다).
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Optics")
-	float WideHFovDeg = 69.88f;
+	float WideHFovDeg = 57.14f;
 
-	/** wide 프리셋에서의 수직 FOV(deg). 실측값 30.48 (종횡비에서 유도하지 말 것). */
+	/**
+	 * setcenter 가 쓰는 초점거리 배율. 1.0 = 기하학적으로 정확한 카메라(기본).
+	 *
+	 * 실기 펌웨어는 기하는 맞게 풀지만 자기가 믿는 초점거리가 실제 렌즈와 어긋나서 조준이
+	 * 빗나간다(줌에 따라 0.99~1.11, 망원 포화 구간에선 0.75 — 즉 과회전). 그 결함을 시뮬에서
+	 * 일부러 재현하고 싶을 때(예: 클릭 보정 파이프라인을 실카메라 없이 검증) 이 값을 바꾼다.
+	 * 시뮬을 '정확한 카메라'로 쓰는 평상시에는 1.0 으로 둔다.
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Optics")
-	float WideVFovDeg = 30.48f;
+	float SetCenterFocalGain = 1.f;
 
 	/** Pan 모터 슬루 속도 (centi-degree/sec). 9000 = 90deg/s. */
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Motor")
