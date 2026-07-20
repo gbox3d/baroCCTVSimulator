@@ -8,9 +8,38 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/Scene.h"   // FPostProcessSettings, EDynamicGlobalIlluminationMethod, EReflectionMethod
+#include "HAL/IConsoleManager.h"
 #include "ImageUtils.h"
+#include "RHIGlobals.h"     // GRHISupportsRayTracing
 
 DEFINE_LOG_CATEGORY_STATIC(LogPTZCapture, Log, All);
+
+static TAutoConsoleVariable<int32> CVarBaroCapturePersistRenderingState(
+	TEXT("baro.Capture.PersistRenderingState"), 1,
+	TEXT("PTZ 캡처 SceneCapture 의 persistent ViewState 허용 여부.\n")
+	TEXT(" 1(기본): HWRT Lumen 이 실제 가용할 때만 켠다 — SW Lumen 은 UE5.8 DistanceFields 누수로 항상 끔\n")
+	TEXT(" 0: 항상 끔"),
+	ECVF_Default);
+
+namespace
+{
+	// UE 5.8 소프트웨어 Lumen(SDF 트레이싱)은 persistent ViewState 를 가진 SceneCapture 에서 캡처
+	// 프레임마다 CPU 메모리를 회수하지 않는다(LLM 태그 DistanceFields, 실측 ~1.9MB/s @30fps 720p —
+	// 라디언스캐시·템포럴·서피스캐시 피드백·브릭 아틀라스 크기 cvar 전부 무관, Lumen GI off 또는
+	// ViewState 제거 시에만 소멸. 2026-07-20 A/B 10회 실측). ViewState 를 끄면 누수는 없지만 Lumen
+	// 시간축 수렴이 사라져 암부가 뭉개진다(clipLo 15%→18% 실측). HWRT Lumen 경로는 누수 원천인
+	// SDF/GDF 프레임 갱신을 쓰지 않으므로, HWRT 가 실제 가용한 경우에만 persist 를 허용한다.
+	bool ShouldPersistCaptureRenderingState()
+	{
+		if (CVarBaroCapturePersistRenderingState.GetValueOnGameThread() == 0)
+		{
+			return false;
+		}
+		static const IConsoleVariable* LumenHWRT =
+			IConsoleManager::Get().FindConsoleVariable(TEXT("r.Lumen.HardwareRayTracing"));
+		return GRHISupportsRayTracing && LumenHWRT && LumenHWRT->GetInt() != 0;
+	}
+}
 
 UPTZCaptureComponent::UPTZCaptureComponent()
 {
@@ -58,10 +87,10 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		CaptureComp->CaptureSource = SCS_FinalColorLDR;
 		CaptureComp->bCaptureEveryFrame = false;   // 요청 시에만
 		CaptureComp->bCaptureOnMovement = false;
-		// UE 5.8에서 Lumen SceneCapture의 persistent ViewState를 켜면 캡처 중 프로세스
-		// 물리 메모리가 1.2~1.9 MB/s로 계속 증가한다. 캡처/JPEG/소켓을 분리한 A/B 검증에서
-		// 이 플래그를 끈 경우만 정상 기울기(-0.3 MB/s)로 복귀했으므로 재발 방지를 위해 끈다.
-		CaptureComp->bAlwaysPersistRenderingState = false;
+		// persist 판정 근거는 상단 ShouldPersistCaptureRenderingState() 주석 참조(UE5.8 SW Lumen 누수).
+		CaptureComp->bAlwaysPersistRenderingState = ShouldPersistCaptureRenderingState();
+		// r.RayTracing.SceneCaptures 기본값(-1)은 컴포넌트 설정을 따른다 — HWRT Lumen 캡처에 필수.
+		CaptureComp->bUseRayTracingIfEnabled = true;
 		// 버추얼 텍스처(SVT) 페이지 스트리밍은 렌더 픽셀의 피드백으로 굴러가는데, 이 sim 은
 		// bDisableWorldRendering 으로 메인 뷰포트를 끄고 SceneCapture 만 돌린다. 캡처의 VT
 		// 피드백은 스로틀에 막혀 페이지가 안 올라오고(부팅별 복불복·-RenderOffscreen 은 상시),
