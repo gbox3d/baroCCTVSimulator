@@ -58,8 +58,10 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		CaptureComp->CaptureSource = SCS_FinalColorLDR;
 		CaptureComp->bCaptureEveryFrame = false;   // 요청 시에만
 		CaptureComp->bCaptureOnMovement = false;
-		// 단발 캡처 사이 노출/TAA 히스토리 유지 — 없으면 첫 캡처 노출이 망가진다.
-		CaptureComp->bAlwaysPersistRenderingState = true;
+		// UE 5.8에서 Lumen SceneCapture의 persistent ViewState를 켜면 캡처 중 프로세스
+		// 물리 메모리가 1.2~1.9 MB/s로 계속 증가한다. 캡처/JPEG/소켓을 분리한 A/B 검증에서
+		// 이 플래그를 끈 경우만 정상 기울기(-0.3 MB/s)로 복귀했으므로 재발 방지를 위해 끈다.
+		CaptureComp->bAlwaysPersistRenderingState = false;
 		// 버추얼 텍스처(SVT) 페이지 스트리밍은 렌더 픽셀의 피드백으로 굴러가는데, 이 sim 은
 		// bDisableWorldRendering 으로 메인 뷰포트를 끄고 SceneCapture 만 돌린다. 캡처의 VT
 		// 피드백은 스로틀에 막혀 페이지가 안 올라오고(부팅별 복불복·-RenderOffscreen 은 상시),
@@ -71,8 +73,8 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		CaptureComp->ShowFlags.SetMotionBlur(false);
 		// 선명도(적대적 검증 결론): 단발 SceneCapture 는 뷰포트의 TSR 시간축 누적(초해상도+샤픈)이
 		// 없어 "프레임 0"처럼 소프트하다. 예전엔 TemporalAA 를 껐는데, 그건 TSR→FXAA 블러 경로로
-		// 강제해 오히려 더 뿌옇게 만든 오답이었다. 올바른 해법: TSR/TAA 를 켜고, CaptureJpeg 에서
-		// 정지 화면을 여러 프레임 워밍업해 히스토리를 수렴시킨다(bAlwaysPersistRenderingState 로 유지).
+		// 강제해 오히려 더 뿌옇게 만든 오답이었다. AA 플래그는 유지하되, persistent ViewState는
+		// 위 메모리 누수 때문에 사용하지 않는다.
 		CaptureComp->ShowFlags.SetTemporalAA(true);
 		CaptureComp->ShowFlags.SetAntiAliasing(true);
 		// SceneCapture2D 기본 PostProcess 는 GI/Reflection=None 이라 Lumen fidelity 를 잃는다 → 명시 오버라이드.
@@ -108,9 +110,8 @@ bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality,
 	CaptureComp->PostProcessSettings.bOverride_ColorContrast = true;
 	CaptureComp->PostProcessSettings.ColorContrast = FVector4(Contrast, Contrast, Contrast, 1.0);
 
-	// TSR 히스토리 워밍업: 정지 화면을 여러 번 렌더해 시간축 누적(초해상도+샤픈)과 Lumen/RT 디노이즈를
-	// 수렴시킨다 → 뷰포트급 선명도. bAlwaysPersistRenderingState=true 라 연속 CaptureScene 이 같은
-	// 뷰의 히스토리를 쌓는다. (스냅샷=WarmupFrames>0 수렴, 스트림=연속프레임이라 0 으로 자연 누적.)
+	// 캡처 워밍업: 노출/Lumen 리소스가 첫 readback 전에 안정될 시간을 준다. UE 5.8 Lumen
+	// ViewState 누수를 막기 위해 요청 간 temporal history는 보존하지 않는다.
 	const int32 Frames = FMath::Max(1, WarmupFrames + 1);
 	for (int32 i = 0; i < Frames; ++i)
 	{
