@@ -3,7 +3,7 @@
 `baroCCTVSimulator` 플러그인을 사용해 **언리얼 안의 PTZ 카메라를 실기(Hucoms) CCTV처럼 제어·스트리밍**하는 방법과, 그 통신 프로토콜(HTTP CGI) 레퍼런스 및 실전 예제를 담는다.
 
 - 대상: 이 시뮬레이터에 붙는 클라이언트(`baro_calory` 등)를 개발하거나, 카메라를 배치/튜닝하는 개발자.
-- 호환: 플러그인 v1.0 / **Hucoms HTTP API V1.22** 표면 호환.
+- 기준 구현: 플러그인 v0.1.7 / **Hucoms HTTP API V1.22** 표면 호환.
 - 함께 볼 문서: [`README.md`](../README.md)(플러그인 개요·모듈 구성), [`docs/INTEGRATION.md`](INTEGRATION.md)(프로젝트에 submodule로 세우는 절차). 이 문서는 **"세운 뒤 실제로 쓰고 통신하는 법"** 이다.
 
 ## 목차
@@ -83,7 +83,7 @@
 | `PTZ\|Hucoms` | `HucomsHttpPort` | `0` | HTTP 포트(0=자동 `BaseHttpPort+인덱스`) |
 | `PTZ\|Hucoms` | `HucomsMjpegPort` | `0` | MJPEG 포트(0=자동 `BaseMjpegPort+인덱스`) |
 | `PTZ\|Limits` | `PanMin/Max`, `TiltMin/Max` | ±180 / −90..30 | 기계적 한계(서버가 sim용으로 넓힘) |
-| `PTZ\|Optics` | `BaseFOV` | 90 | 1x 기준 수평 FOV(서버가 `WideHFovDeg=69.88`로 세팅) |
+| `PTZ\|Optics` | `BaseFOV` | 90 | 에디터 기본값. Hucoms 서버 기동 시 `WideHFovDeg=57.14`로 세팅 |
 
 > **주차장 sim 레벨의 배치 규약**: CCTV는 카메라 폴(`BP_Pole`)의 **자식**으로, 폴 기준 `RelativeLocation (0,0,600)`(암 높이), `Pitch −20`. **폴 개수 = 카메라 개수**.
 
@@ -116,11 +116,11 @@
 |---|---|---|---|---|
 | Pan | `panpos` | `0 .. 35999` | centi-degree(0.01°) | **higher = 우측(시계, 위에서 봄)**. 0/35999 이음매를 최단 호로 이동 |
 | Tilt | `tiltpos` | `-2000 .. 9000` | centi-degree | **higher = 카메라가 아래를 봄** (−20°..+90°) |
-| Zoom | `zoompos` | `0 .. 65535` | raw tick | **higher = 망원(줌인)**. wide(0)=HFOV 69.88° |
+| Zoom | `zoompos` | `0 .. 65535` | raw tick | **higher = 망원(줌인)**. wide(0)=HFOV 57.14°, 광학 화각은 16384부터 2.39°로 포화 |
 | Focus | `focuspos` | `0 .. 65535` | raw tick | (시뮬은 즉시 반영) |
 
 - **센터링 픽셀 프레임은 항상 논리 `1920 × 1080`**. 클릭 좌표는 이 좌표계로 보낸다(스냅샷 실제 해상도 QHD와 무관).
-- 픽셀↔각도 변환은 **LINEAR 모델**(tan 아님) — 실기 펌웨어 재현: `panDelta = ((x − 960)/1920)·HFOV·100`, `tiltDelta = ((y − 540)/1080)·VFOV·100`.
+- 픽셀→PTZ 델타는 **TAN 핀홀 역투영 + 구면 짐벌 기하**를 사용한다. 논리 픽셀을 현재 HFOV로 카메라 광선에 역투영한 뒤, 현재 틸트를 포함해 그 광선이 새 광축이 되도록 pan/tilt를 푼다. 따라서 틸어진 카메라에서는 가로 클릭만 해도 작은 tilt 보정이 생긴다.
 - **모터 슬루**: 명령은 목표(Tgt)만 바꾸고, 현재(Cur)가 매 틱 일정 속도로 목표를 향해 이동한다(Pan 90°/s, Tilt 60°/s 기본). 따라서 이동 명령 직후엔 `getptzfpos`가 아직 목표에 도달 안 한 중간값을 반환한다 → **settle 폴링** 필요(§7).
 
 ---
@@ -335,8 +335,8 @@ done
 BaseHttpPort=8081
 BaseMjpegPort=8091
 ; --- 광학(실측 캘리브레이션, 함부로 바꾸지 말 것) ---
-WideHFovDeg=69.88
-WideVFovDeg=30.48
+WideHFovDeg=57.14
+SetCenterFocalGain=1.0
 ; --- 캡처(스냅샷) ---
 SnapshotWidth=2560
 SnapshotHeight=1440
@@ -351,7 +351,9 @@ StreamHeight=720
 StreamJpegQuality=80
 ```
 
-> `WideHFovDeg`/`WideVFovDeg`는 실기 cam-001에서 실측된 값으로 `setcenter` LINEAR 모델과 줌 매핑의 기준이다. 종횡비로 유도하거나 임의로 바꾸면 조준/줌이 실기와 어긋난다.
+> `WideHFovDeg`는 wide 프리셋의 수평 화각이다. 세로 화각은 같은 초점거리와 프레임 종횡비에서 유도하며 별도 `WideVFovDeg` 설정을 두지 않는다. `SetCenterFocalGain=1.0`은 기하학적으로 정확한 센터링이고, 실기 펌웨어의 초점거리 오차를 재현할 때만 조정한다.
+>
+> 시뮬레이터의 전체 화각표는 `HucomsProtocol::ZoomHfovTable`의 13개 앵커를 단일 소스로 사용한다. `/scene/cameras[].intrinsics.zoomHfov`는 각 카메라의 `WideHFovDeg`가 이미 반영된 실효 표를 `{zoomPos,hfovDeg}` 배열로 노출하므로 소비자는 다시 비례 보정하지 않는다. 실카메라 화각표는 이 표와 별개로 `baro_calory/packages/web-ui/src/camera-intrinsics.mjs` 및 `devices[].intrinsics`에서 JS가 관리한다. 전체 Scene API 계약은 소비 프로젝트의 [`docs/scene-control-api.md`](../../../docs/scene-control-api.md)를 따른다.
 
 ---
 

@@ -11,9 +11,9 @@
 // 비틱) 별도 UWorldSubsystem 으로 분리한다. 포트 8095 는 baro_calory config.simulator.port 와 일치.
 //
 // 계약(엔드포인트):
-//   GET    /scene/catalog        차종목록(index·name·asset)·색상·번호판종류·한글목록
+//   GET    /scene/catalog        차종목록(index·name·asset·boundsCm)·색상·번호판종류·한글목록
 //   GET    /scene/slots          주차면(id·label·type·transform·occupied·carId)
-//   GET    /scene/cameras        카메라 광학 포즈(CameraComp 월드)+FOV+해상도+PTZ+포트 (오버레이 투영 파라미터)
+//   GET    /scene/cameras        카메라 광학 포즈·포트·화각표·슬롯 기준면/높이 (현재 PTZ/FOV는 Hucoms)
 //   POST   /scene/project        월드점→픽셀 그라운드-트루스(UE 뷰·투영행렬; 웹 오버레이 정합 검증 오라클)
 //   GET    /scene/cars           배치된 차량
 //   POST   /scene/cars           스폰 {slotId,carType,color,plate}
@@ -80,6 +80,10 @@ private:
 	TArray<FString> CarAssetNames;
 	bool bCarAssetNamesResolved = false;   // 실패해도 재시도·경고 반복을 막는다
 
+	/** 차종별 최종 표시 메시 aggregate actor-local bounds(cm). CarAssetNames 와 같은 인덱스, 최초 요청 시 1회 계산. */
+	TArray<FBox> CarBoundsCm;
+	bool bCarBoundsResolved = false;
+
 	TSharedPtr<IHttpRouter> Router;
 	TArray<FHttpRouteHandle> Routes;
 
@@ -102,8 +106,12 @@ private:
 	UClass* ResolveCarClass();
 	/** 차종 에셋명(BP_Car.Mesh_List). 실패하면 빈 배열 — 호출부는 인덱스만 노출한다. */
 	const TArray<FString>& GetCarAssetNames();
+	/** 임시 BP_Car 한 대에 차종을 순차 적용해 최종 표시 메시 aggregate actor-local bounds를 계산·캐시한다. */
+	const TArray<FBox>& GetCarBoundsCm();
 	/** carType 을 실제 Mesh_List 길이로 클램프. Mesh_List 를 못 읽으면 과거 범위(0..22). */
 	int32 ClampCarType(int32 InCarType);
 	AActor* SpawnCarActor(const FTransform& Xform);
 	void ApplyToActor(AActor* Car, const FSimCarState& S);   // BP setter 호출(Change_Car/Color/Plate/Text)
+	/** 슬롯의 현재 점유 차량을 축출한다(액터 파괴 + Cars/SlotOccupancy 정리). force 덮어쓰기 전에 호출해 슬롯당 1대를 보장한다. */
+	void EvictSlotOccupant(const FString& SlotId);
 };

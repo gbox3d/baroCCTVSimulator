@@ -11,10 +11,12 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"                     // TActorIterator
 #include "Components/ChildActorComponent.h"
+#include "Components/MeshComponent.h"         // UMeshComponent (차량 렌더 메시 aggregate bounds)
 #include "UObject/UnrealType.h"              // FIntProperty, FArrayProperty, FindFProperty, FScriptArrayHelper
 #include "UObject/SoftObjectPath.h"          // FSoftObjectPath::GetAssetName (Mesh_List 가 soft 참조일 때)
 
 #include "PTZCamera.h"                        // APTZCamera (오버레이 투영 대상 카메라)
+#include "HucomsProtocol.h"                   // zoompos->HFOV 공용 실측표
 #include "HucomsServerSubsystem.h"           // 카메라 실효 포트 조회(GetCameraPorts)
 #include "Camera/CameraComponent.h"          // UCameraComponent (광학 포즈)
 #include "Camera/CameraTypes.h"              // FMinimalViewInfo, ECameraProjectionMode
@@ -50,6 +52,13 @@ namespace
 	};
 
 	struct FSlotInfo { FString Id; FString Label; FString Type; FTransform Xform; };
+	struct FGroundReference
+	{
+		bool bValid = false;
+		double ZCm = 0.0;
+		int32 SampleCount = 0;
+		double MaxDeviationCm = 0.0;
+	};
 
 	FString SerializeJson(const TSharedRef<FJsonObject>& Obj)
 	{
@@ -222,6 +231,30 @@ namespace
 		Out.Sort([](const FSlotInfo& A, const FSlotInfo& B) { return NaturalLess(A.Label, B.Label); });
 	}
 
+	// 슬롯 액터 배치 원점 Z의 중앙값. 짝수 개면 가운데 두 값의 평균을 쓴다.
+	FGroundReference CalculateGroundReference(const TArray<FSlotInfo>& Slots)
+	{
+		FGroundReference Out;
+		Out.SampleCount = Slots.Num();
+		if (Slots.IsEmpty()) { return Out; }
+
+		TArray<double> ZValues;
+		ZValues.Reserve(Slots.Num());
+		for (const FSlotInfo& Slot : Slots) { ZValues.Add(Slot.Xform.GetLocation().Z); }
+		ZValues.Sort();
+
+		const int32 Mid = ZValues.Num() / 2;
+		Out.ZCm = (ZValues.Num() % 2 == 0)
+			? (ZValues[Mid - 1] + ZValues[Mid]) * 0.5
+			: ZValues[Mid];
+		for (const double Z : ZValues)
+		{
+			Out.MaxDeviationCm = FMath::Max(Out.MaxDeviationCm, FMath::Abs(Z - Out.ZCm));
+		}
+		Out.bValid = true;
+		return Out;
+	}
+
 	// --- 차종 목록 ---
 	// BP_Car 의 Mesh_List(StaticMesh 배열) 원소 순서가 selected_Car 인덱스의 유일한 진실이다
 	// (Change_Car = Array_Get(Mesh_List, selected_Car) -> SetStaticMesh). 이름을 C++ 에 베끼면
@@ -269,6 +302,25 @@ namespace
 			}
 		}
 		return N > 0;
+	}
+
+	// 표시 중인 메시 컴포넌트만 actor-local 좌표로 합친다. UMeshComponent 로 한정해
+	// 번호판의 가변 TextRender bounds가 차량 치수에 섞이지 않게 하고, child actor는 재귀 포함한다.
+	FBox CalculateRenderedMeshBounds(const AActor* Car)
+	{
+		FBox Box(ForceInit);
+		if (!Car) { return Box; }
+
+		Car->ForEachComponent<UMeshComponent>(/*bIncludeFromChildActors=*/true,
+			[&](UMeshComponent* Mesh)
+			{
+				if (!Mesh || !Mesh->IsRegistered() || !Mesh->IsVisible()) { return; }
+				const FTransform ComponentToActor =
+					Mesh->GetComponentTransform().GetRelativeTransform(Car->GetActorTransform());
+				const FBox MeshBox = Mesh->CalcBounds(ComponentToActor).GetBox();
+				if (MeshBox.IsValid && !MeshBox.GetSize().IsNearlyZero()) { Box += MeshBox; }
+			});
+		return Box;
 	}
 
 	bool SetIntProp(UObject* Obj, const TCHAR* Name, int32 Val)
@@ -363,8 +415,10 @@ namespace
 	//   mount.location : 광학중심 월드 위치. 피벗이 Root 와 동일위치(레버암 0)라 pan/tilt 에 불변 = 고정.
 	//   mount.baseYaw  : 설치 방위(pan=0 기준 yaw). 광학 yaw = baseYaw + CurrentPan 이므로 역산.
 	//   wideHFovDeg    : 1x 수평 FOV(hfovFromZoomPos 스케일 기준).
+	//   intrinsics     : 이 카메라의 BaseFOV로 스케일된 zoompos→HFOV 표와 해석 규칙.
+	//   groundReference/heightAboveReferenceGroundCm : 슬롯 배치 원점 기반 기준면과 광학중심 높이.
 	// FOV·PTZ 는 실카메라와 동일하게 Hucoms(getptzfpos + zoompos)에서 가져온다 → 여기서 중복 노출하지 않음.
-	TSharedRef<FJsonObject> CameraToJson(const FCamEntry& E)
+	TSharedRef<FJsonObject> CameraToJson(const FCamEntry& E, const FGroundReference& Ground)
 	{
 		APTZCamera* C = E.Cam;
 		const FTransform X = CameraOpticalTransform(C);
@@ -385,6 +439,39 @@ namespace
 		O->SetObjectField(TEXT("mount"), Mount);
 
 		O->SetNumberField(TEXT("wideHFovDeg"), C->BaseFOV);
+
+		TSharedRef<FJsonObject> Intrinsics = MakeShared<FJsonObject>();
+		Intrinsics->SetStringField(TEXT("interpolation"), TEXT("linear"));
+		Intrinsics->SetBoolField(TEXT("clamp"), true);
+		TArray<TSharedPtr<FJsonValue>> ZoomHfov;
+		ZoomHfov.Reserve(HucomsProtocol::ZoomHfovTableCount);
+		for (const HucomsProtocol::FZoomHfovPoint& Point : HucomsProtocol::ZoomHfovTable)
+		{
+			TSharedRef<FJsonObject> Anchor = MakeShared<FJsonObject>();
+			Anchor->SetNumberField(TEXT("zoomPos"), Point.ZoomPos);
+			Anchor->SetNumberField(
+				TEXT("hfovDeg"),
+				HucomsProtocol::ZoomPosToHFov(Point.ZoomPos, C->BaseFOV));
+			ZoomHfov.Add(MakeShared<FJsonValueObject>(Anchor));
+		}
+		Intrinsics->SetArrayField(TEXT("zoomHfov"), ZoomHfov);
+		O->SetObjectField(TEXT("intrinsics"), Intrinsics);
+
+		if (Ground.bValid)
+		{
+			TSharedRef<FJsonObject> Ref = MakeShared<FJsonObject>();
+			Ref->SetNumberField(TEXT("zCm"), Ground.ZCm);
+			Ref->SetStringField(TEXT("method"), TEXT("parkingSlotPlacementOriginMedian"));
+			Ref->SetNumberField(TEXT("sampleCount"), Ground.SampleCount);
+			Ref->SetNumberField(TEXT("maxDeviationCm"), Ground.MaxDeviationCm);
+			O->SetObjectField(TEXT("groundReference"), Ref);
+			O->SetNumberField(TEXT("heightAboveReferenceGroundCm"), Loc.Z - Ground.ZCm);
+		}
+		else
+		{
+			O->SetField(TEXT("groundReference"), MakeShared<FJsonValueNull>());
+			O->SetField(TEXT("heightAboveReferenceGroundCm"), MakeShared<FJsonValueNull>());
+		}
 		return O;
 	}
 
@@ -534,6 +621,67 @@ const TArray<FString>& USceneControlSubsystem::GetCarAssetNames()
 	return CarAssetNames;
 }
 
+const TArray<FBox>& USceneControlSubsystem::GetCarBoundsCm()
+{
+	if (bCarBoundsResolved) { return CarBoundsCm; }
+	bCarBoundsResolved = true;
+
+	const TArray<FString>& Assets = GetCarAssetNames();
+	CarBoundsCm.Init(FBox(ForceInit), Assets.Num());
+	UWorld* World = GetWorld();
+	UClass* Cls = ResolveCarClass();
+	if (!World || !Cls || Assets.IsEmpty()) { return CarBoundsCm; }
+
+	// 한 대만 transient로 만들고 차종을 순차 적용한다. 카탈로그 첫 요청에서만 발생하며,
+	// 같은 요청 중 Destroy하므로 게임 상태·Cars/SlotOccupancy에는 들어가지 않는다.
+	FActorSpawnParameters Params;
+	Params.ObjectFlags |= RF_Transient;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Probe = World->SpawnActor<AActor>(
+		Cls, FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	if (!Probe)
+	{
+		UE_LOG(LogSceneCtrl, Warning, TEXT("[Scene] 차량 bounds probe 스폰 실패."));
+		return CarBoundsCm;
+	}
+	// 렌더 스레드가 다음 프레임을 준비해도 probe가 노출되지 않게 즉시 숨긴다.
+	// bounds 필터는 owner hidden과 무관한 component IsVisible()을 사용해 원래 표시 상태를 보존한다.
+	Probe->SetActorHiddenInGame(true);
+	Probe->SetActorEnableCollision(false);
+	Probe->SetActorTickEnabled(false);
+
+	// 표시 메시 상태를 결정하는 모든 BP setter를 같은 값으로 통과시키는 canonical 상태.
+	FSimCarState Canonical;
+	Canonical.Color = 0;
+	Canonical.PlateType = 0;
+	Canonical.Prefix = TEXT("000");
+	Canonical.Kor = TEXT("가");
+	Canonical.Number = TEXT("0000");
+
+	for (int32 i = 0; i < Assets.Num(); ++i)
+	{
+		Canonical.CarType = i;
+		ApplyToActor(Probe, Canonical);
+		CarBoundsCm[i] = CalculateRenderedMeshBounds(Probe);
+
+		const FVector Size = CarBoundsCm[i].GetSize();
+		if (!CarBoundsCm[i].IsValid || Size.ContainsNaN()
+			|| Size.X <= KINDA_SMALL_NUMBER || Size.Y <= KINDA_SMALL_NUMBER || Size.Z <= KINDA_SMALL_NUMBER)
+		{
+			CarBoundsCm[i] = FBox(ForceInit);
+			UE_LOG(
+				LogSceneCtrl,
+				Warning,
+				TEXT("[Scene] 차량 bounds 계산 실패: carType=%d asset=%s"),
+				i,
+				*Assets[i]);
+		}
+	}
+
+	Probe->Destroy();
+	return CarBoundsCm;
+}
+
 int32 USceneControlSubsystem::ClampCarType(int32 InCarType)
 {
 	const int32 N = GetCarAssetNames().Num();
@@ -581,8 +729,9 @@ bool USceneControlSubsystem::HandleCatalog(const FHttpServerRequest& /*Req*/, co
 	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("baroCCTVSimulator"))) { PluginVer = Plugin->GetDescriptor().VersionName; }
 	O->SetStringField(TEXT("pluginVersion"), PluginVer);
 
-	// 차종: BP_Car.Mesh_List 를 읽어 index/name/asset 을 싣는다. carCount 는 그 길이(구 계약 유지).
+	// 차종: BP_Car.Mesh_List 를 읽어 index/name/asset/boundsCm 을 싣는다. carCount 는 그 길이(구 계약 유지).
 	const TArray<FString>& CarAssets = GetCarAssetNames();
+	const TArray<FBox>& CarBounds = GetCarBoundsCm();
 	O->SetNumberField(TEXT("carCount"), CarAssets.Num() > 0 ? CarAssets.Num() : LegacyCarCount);
 
 	TArray<TSharedPtr<FJsonValue>> CarsJson;
@@ -592,6 +741,29 @@ bool USceneControlSubsystem::HandleCatalog(const FHttpServerRequest& /*Req*/, co
 		C->SetNumberField(TEXT("index"), i);
 		C->SetStringField(TEXT("name"), CarAssetToDisplayName(CarAssets[i]));
 		C->SetStringField(TEXT("asset"), CarAssets[i]);
+		if (CarBounds.IsValidIndex(i) && CarBounds[i].IsValid)
+		{
+			const FVector Center = CarBounds[i].GetCenter();
+			const FVector Size = CarBounds[i].GetSize();
+			TSharedRef<FJsonObject> CenterJson = MakeShared<FJsonObject>();
+			CenterJson->SetNumberField(TEXT("x"), Center.X);
+			CenterJson->SetNumberField(TEXT("y"), Center.Y);
+			CenterJson->SetNumberField(TEXT("z"), Center.Z);
+			TSharedRef<FJsonObject> SizeJson = MakeShared<FJsonObject>();
+			SizeJson->SetNumberField(TEXT("x"), Size.X);
+			SizeJson->SetNumberField(TEXT("y"), Size.Y);
+			SizeJson->SetNumberField(TEXT("z"), Size.Z);
+			TSharedRef<FJsonObject> BoundsJson = MakeShared<FJsonObject>();
+			BoundsJson->SetStringField(TEXT("coordinateSpace"), TEXT("actorLocal"));
+			BoundsJson->SetObjectField(TEXT("center"), CenterJson);
+			BoundsJson->SetObjectField(TEXT("size"), SizeJson);
+			BoundsJson->SetStringField(TEXT("source"), TEXT("renderedMeshAggregate"));
+			C->SetObjectField(TEXT("boundsCm"), BoundsJson);
+		}
+		else
+		{
+			C->SetField(TEXT("boundsCm"), MakeShared<FJsonValueNull>());
+		}
 		CarsJson.Add(MakeShared<FJsonValueObject>(C));
 	}
 	O->SetArrayField(TEXT("cars"), CarsJson);
@@ -658,9 +830,12 @@ bool USceneControlSubsystem::HandleCameras(const FHttpServerRequest& /*Req*/, co
 {
 	TArray<FCamEntry> Cams;
 	CollectCameras(GetWorld(), Cams);
+	TArray<FSlotInfo> Slots;
+	CollectSlots(GetWorld(), ParkingSlotClassPrefix, Slots);
+	const FGroundReference Ground = CalculateGroundReference(Slots);
 
 	TArray<TSharedPtr<FJsonValue>> Arr;
-	for (const FCamEntry& E : Cams) { Arr.Add(MakeShared<FJsonValueObject>(CameraToJson(E))); }
+	for (const FCamEntry& E : Cams) { Arr.Add(MakeShared<FJsonValueObject>(CameraToJson(E, Ground))); }
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetArrayField(TEXT("cameras"), Arr);
@@ -736,6 +911,22 @@ bool USceneControlSubsystem::HandleProject(const FHttpServerRequest& Req, const 
 	return true;
 }
 
+void USceneControlSubsystem::EvictSlotOccupant(const FString& SlotId)
+{
+	// force 덮어쓰기 전에 대상 슬롯의 기존 점유 차량을 완전히 제거한다.
+	// 이걸 생략하면 SpawnCarActor(AlwaysSpawn)가 옛 차 위에 새 차를 겹쳐 스폰하고,
+	// SlotOccupancy 값만 새 carId 로 바뀌어 옛 차가 유령처럼 남는다(옛 차 DELETE 시 새 차 점유가 지워지는 교차 오염도 유발).
+	const FString* OccIdPtr = SlotOccupancy.Find(SlotId);
+	if (!OccIdPtr) { return; }
+	const FString OccId = *OccIdPtr;              // 복사 — 아래 Remove 가 이 포인터를 무효화한다.
+	if (FSimCarState* Occ = Cars.Find(OccId))
+	{
+		if (AActor* A = Occ->Actor.Get()) { A->Destroy(); }
+		Cars.Remove(OccId);                       // 다른 키 제거는 TMap 의 타 원소 포인터를 무효화하지 않는다(PATCH 의 S 안전).
+	}
+	SlotOccupancy.Remove(SlotId);                 // 매핑도 정리(점유 차량이 외부에서 이미 사라진 경우까지 self-heal).
+}
+
 bool USceneControlSubsystem::HandleCars(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
 {
 	// GET = 목록
@@ -781,7 +972,11 @@ bool USceneControlSubsystem::HandleCars(const FHttpServerRequest& Req, const FHt
 		TArray<FSlotInfo> Slots; CollectSlots(GetWorld(), ParkingSlotClassPrefix, Slots);
 		const FSlotInfo* Found = Slots.FindByPredicate([&](const FSlotInfo& X) { return X.Id == SlotId; });
 		if (!Found) { OnComplete(JsonError(EHttpServerResponseCodes::NotFound, FString::Printf(TEXT("주차면 없음: %s"), *SlotId))); return true; }
-		if (SlotOccupancy.Contains(SlotId) && !bForce) { OnComplete(JsonError(EHttpServerResponseCodes::Conflict, FString::Printf(TEXT("주차면 점유됨: %s"), *SlotId))); return true; }
+		if (SlotOccupancy.Contains(SlotId))
+		{
+			if (!bForce) { OnComplete(JsonError(EHttpServerResponseCodes::Conflict, FString::Printf(TEXT("주차면 점유됨: %s"), *SlotId))); return true; }
+			EvictSlotOccupant(SlotId);   // force = 기존 점유 차량 파괴 후 덮어쓰기(겹쳐 스폰 방지).
+		}
 		Xform = Found->Xform;
 		S.SlotId = SlotId;
 	}
@@ -863,7 +1058,11 @@ bool USceneControlSubsystem::HandleCarById(const FHttpServerRequest& Req, const 
 			TArray<FSlotInfo> Slots; CollectSlots(GetWorld(), ParkingSlotClassPrefix, Slots);
 			const FSlotInfo* Found = Slots.FindByPredicate([&](const FSlotInfo& X) { return X.Id == NewSlot; });
 			if (!Found) { OnComplete(JsonError(EHttpServerResponseCodes::NotFound, FString::Printf(TEXT("주차면 없음: %s"), *NewSlot))); return true; }
-			if (SlotOccupancy.Contains(NewSlot) && !bForce) { OnComplete(JsonError(EHttpServerResponseCodes::Conflict, FString::Printf(TEXT("주차면 점유됨: %s"), *NewSlot))); return true; }
+			if (SlotOccupancy.Contains(NewSlot))
+			{
+				if (!bForce) { OnComplete(JsonError(EHttpServerResponseCodes::Conflict, FString::Printf(TEXT("주차면 점유됨: %s"), *NewSlot))); return true; }
+				EvictSlotOccupant(NewSlot);   // force = 대상 슬롯의 기존 차량 파괴(옮겨가는 차와 항상 다른 차 → S 안전).
+			}
 			if (!S->SlotId.IsEmpty()) { SlotOccupancy.Remove(S->SlotId); }
 			S->SlotId = NewSlot;
 			S->Transform = Found->Xform;

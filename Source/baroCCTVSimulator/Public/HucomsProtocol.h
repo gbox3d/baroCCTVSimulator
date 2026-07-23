@@ -67,6 +67,21 @@ namespace HucomsProtocol
 	inline int32 ClampZoom(int32 ZoomPos)  { return FMath::Clamp(ZoomPos, ZoomPosMin, ZoomPosMax); }
 	inline int32 ClampFocus(int32 FocusPos){ return FMath::Clamp(FocusPos, FocusPosMin, FocusPosMax); }
 
+	/** 실측 zoompos -> 수평 FOV 앵커. 보간 함수와 /scene/cameras 직렬화가 함께 쓰는 단일 소스. */
+	struct FZoomHfovPoint
+	{
+		int32 ZoomPos;
+		float HFovDeg;
+	};
+
+	inline constexpr FZoomHfovPoint ZoomHfovTable[] = {
+		{     0, 57.14f }, {  2000, 47.89f }, {  3000, 43.37f }, {  5129, 34.05f },
+		{  8000, 22.59f }, { 10338, 14.68f }, { 12161,  9.77f }, { 14000,  6.29f },
+		{ 15000,  4.88f }, { 15400,  4.32f }, { 15800,  3.74f }, { 16100,  3.16f },
+		{ 16384,  2.39f },
+	};
+	inline constexpr int32 ZoomHfovTableCount = UE_ARRAY_COUNT(ZoomHfovTable);
+
 	/**
 	 * zoompos -> 수평 FOV(deg). 실측 캘리브레이션 표(cam-001)를 선형보간.
 	 * 표의 wide 값을 설정값 WideHFovDeg 에 맞춰 비례 보정한다.
@@ -75,32 +90,30 @@ namespace HucomsProtocol
 	 * (선형 가정으로 역산된 유물). tools/centering_calib 으로 줌 15단계를 실측해 전면 교체:
 	 * 실제 광학은 z≈16384 에서 **포화**하며(그 이상 화각 불변 2.39°), 15000~16384 구간에서 화각이
 	 * 절반으로 꺾이므로 그 구간에 앵커를 촘촘히 둔다(성기게 두면 보간이 거짓말을 한다).
-	 * JS 단일 소스 baro_calrory/packages/web-ui/src/camera-intrinsics.mjs 의 ZOOM_HFOV_TABLE 과
-	 * **반드시 같은 값**을 유지할 것 — 한쪽만 고치면 오버레이가 렌더와 어긋난다.
+	 * 이 표는 시뮬레이터 렌더와 /scene/cameras 직렬화가 공유하는 시뮬 쪽 단일 소스다.
+	 * 실카메라 표는 baro_calory/packages/web-ui/src/camera-intrinsics.mjs 와 devices[].intrinsics가
+	 * 별도로 관리한다. 웹은 sim API 표가 있으면 그것을 우선하고, 없으면 실기/레거시 JS 표를 쓴다.
 	 */
 	inline float ZoomPosToHFov(int32 ZoomPos, float WideHFovDeg)
 	{
-		struct FZPt { int32 Z; float H; };
-		static const FZPt Tbl[] = {
-			{     0, 57.14f }, {  2000, 47.89f }, {  3000, 43.37f }, {  5129, 34.05f },
-			{  8000, 22.59f }, { 10338, 14.68f }, { 12161,  9.77f }, { 14000,  6.29f },
-			{ 15000,  4.88f }, { 15400,  4.32f }, { 15800,  3.74f }, { 16100,  3.16f },
-			{ 16384,  2.39f },
-		};
-		constexpr int32 N = UE_ARRAY_COUNT(Tbl);
+		const float Scale = (WideHFovDeg > KINDA_SMALL_NUMBER)
+			? (WideHFovDeg / ZoomHfovTable[0].HFovDeg)
+			: 1.f;
+		const int32 Z = FMath::Clamp(
+			ZoomPos,
+			ZoomHfovTable[0].ZoomPos,
+			ZoomHfovTable[ZoomHfovTableCount - 1].ZoomPos);
 
-		const float Scale = (WideHFovDeg > KINDA_SMALL_NUMBER) ? (WideHFovDeg / Tbl[0].H) : 1.f;
-		const int32 Z = FMath::Clamp(ZoomPos, Tbl[0].Z, Tbl[N - 1].Z);
-
-		for (int32 i = 0; i < N - 1; ++i)
+		for (int32 i = 0; i < ZoomHfovTableCount - 1; ++i)
 		{
-			if (Z <= Tbl[i + 1].Z)
+			if (Z <= ZoomHfovTable[i + 1].ZoomPos)
 			{
-				const float T = (float)(Z - Tbl[i].Z) / (float)(Tbl[i + 1].Z - Tbl[i].Z);
-				return FMath::Lerp(Tbl[i].H, Tbl[i + 1].H, T) * Scale;
+				const float T = static_cast<float>(Z - ZoomHfovTable[i].ZoomPos)
+					/ static_cast<float>(ZoomHfovTable[i + 1].ZoomPos - ZoomHfovTable[i].ZoomPos);
+				return FMath::Lerp(ZoomHfovTable[i].HFovDeg, ZoomHfovTable[i + 1].HFovDeg, T) * Scale;
 			}
 		}
-		return Tbl[N - 1].H * Scale;
+		return ZoomHfovTable[ZoomHfovTableCount - 1].HFovDeg * Scale;
 	}
 
 	/**

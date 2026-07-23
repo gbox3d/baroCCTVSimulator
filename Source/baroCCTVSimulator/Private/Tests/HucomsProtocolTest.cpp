@@ -25,6 +25,74 @@ namespace
 	}
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHucomsZoomHfovTable,
+	"baroCCTVSimulator.Hucoms.Zoom HFOV table anchors interpolation clamp and scaling",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHucomsZoomHfovTable::RunTest(const FString&)
+{
+	constexpr float CanonicalWide = 57.14f;
+	constexpr float AlternateWide = 60.f;
+	constexpr float Tolerance = 0.0001f;
+
+	TestEqual(TEXT("공용 zoom-HFOV 앵커 수"), HucomsProtocol::ZoomHfovTableCount, 13);
+	for (int32 i = 0; i < HucomsProtocol::ZoomHfovTableCount; ++i)
+	{
+		const HucomsProtocol::FZoomHfovPoint& Point = HucomsProtocol::ZoomHfovTable[i];
+		TestTrue(
+			FString::Printf(TEXT("앵커 %d의 canonical HFOV"), i),
+			FMath::IsNearlyEqual(
+				HucomsProtocol::ZoomPosToHFov(Point.ZoomPos, CanonicalWide),
+				Point.HFovDeg,
+				Tolerance));
+
+		if (i > 0)
+		{
+			TestTrue(
+				FString::Printf(TEXT("앵커 %d zoomPos 단조 증가"), i),
+				Point.ZoomPos > HucomsProtocol::ZoomHfovTable[i - 1].ZoomPos);
+			TestTrue(
+				FString::Printf(TEXT("앵커 %d HFOV 단조 감소"), i),
+				Point.HFovDeg < HucomsProtocol::ZoomHfovTable[i - 1].HFovDeg);
+		}
+	}
+
+	TestTrue(
+		TEXT("2000~3000 중간은 선형 보간"),
+		FMath::IsNearlyEqual(
+			HucomsProtocol::ZoomPosToHFov(2500, CanonicalWide),
+			45.63f,
+			Tolerance));
+	TestTrue(
+		TEXT("최소 zoomPos 아래는 첫 앵커로 clamp"),
+		FMath::IsNearlyEqual(
+			HucomsProtocol::ZoomPosToHFov(-1, CanonicalWide),
+			HucomsProtocol::ZoomHfovTable[0].HFovDeg,
+			Tolerance));
+	TestTrue(
+		TEXT("최대 앵커 위는 마지막 앵커로 clamp"),
+		FMath::IsNearlyEqual(
+			HucomsProtocol::ZoomPosToHFov(HucomsProtocol::ZoomPosMax, CanonicalWide),
+			HucomsProtocol::ZoomHfovTable[HucomsProtocol::ZoomHfovTableCount - 1].HFovDeg,
+			Tolerance));
+
+	const float Scale = AlternateWide / CanonicalWide;
+	TestTrue(
+		TEXT("비기본 BaseFOV에서 첫 앵커는 BaseFOV와 일치"),
+		FMath::IsNearlyEqual(
+			HucomsProtocol::ZoomPosToHFov(0, AlternateWide),
+			AlternateWide,
+			Tolerance));
+	TestTrue(
+		TEXT("비기본 BaseFOV에서 망원 앵커도 한 번만 비례 스케일"),
+		FMath::IsNearlyEqual(
+			HucomsProtocol::ZoomPosToHFov(16384, AlternateWide),
+			2.39f * Scale,
+			Tolerance));
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHucomsSetCenterMatchesRealCamera,
 	"baroCCTVSimulator.Hucoms.SetCenter matches the real camera",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -64,7 +64,8 @@ struct FHucomsChannel
  *   BaseHttpPort/BaseMjpegPort + (카메라 인덱스) 로 자동 부여한다. baro_calory devices[].port 와 맞출 것.
  *
  * 설계 핵심 (fidelity): 채널이 정준 PTZ 상태를 소유(Hucoms 정수 단위) → getptzfpos 라운드트립 정확.
- *   모터 슬루를 Tick 에서 시뮬, APTZCamera 는 그 current 를 미러링(SnapToTarget). setcenter 는 LINEAR 모델.
+ *   모터 슬루를 Tick 에서 시뮬, APTZCamera 는 그 current 를 미러링(SnapToTarget).
+ *   setcenter 는 TAN 핀홀 역투영 + 현재 틸트를 포함한 구면 짐벌 기하를 사용.
  *
  * 수명: 게임/PIE 월드의 BeginPlay 에 채널 서버들 시작, Deinitialize 에 정지.
  */

@@ -477,7 +477,7 @@ void UHucomsServerSubsystem::ConfigureCameraForSim(APTZCamera* Cam)
 	{
 		return;
 	}
-	// sim 의 wide HFOV(=69.88) 에 1x 를 맞추고, Hucoms 범위를 시각화할 수 있게 한계를 넓힌다.
+	// sim 의 설정된 wide HFOV(현재 기본 57.14)에 1x 를 맞추고, Hucoms 범위를 시각화할 수 있게 한계를 넓힌다.
 	Cam->BaseFOV       = WideHFovDeg;
 	Cam->PanMin        = FMath::Min(Cam->PanMin, -180.f);
 	Cam->PanMax        = FMath::Max(Cam->PanMax,  180.f);
@@ -724,7 +724,7 @@ void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServe
 		return;
 	}
 
-	// 픽셀(1920x1080 논리 프레임) -> pan/tilt 델타. LINEAR 모델로 실기 펌웨어 재현.
+	// 픽셀(1920x1080 논리 프레임) -> pan/tilt 델타. TAN 핀홀 + 구면 짐벌 모델로 실기 펌웨어 재현.
 	// 기준은 '현재 위치(Cur)' - 실기는 지금 보고 있는 자세에서 센터링한다.
 	const FString Type = GetQ(Req, TEXT("type"), TEXT("point"));
 
