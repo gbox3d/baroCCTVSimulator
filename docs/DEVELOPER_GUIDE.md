@@ -3,7 +3,7 @@
 `baroCCTVSimulator` 플러그인을 사용해 **언리얼 안의 PTZ 카메라를 실기(Hucoms) CCTV처럼 제어·스트리밍**하는 방법과, 그 통신 프로토콜(HTTP CGI) 레퍼런스 및 실전 예제를 담는다.
 
 - 대상: 이 시뮬레이터에 붙는 클라이언트(`baro_calory` 등)를 개발하거나, 카메라를 배치/튜닝하는 개발자.
-- 기준 구현: 플러그인 v0.1.7 / **Hucoms HTTP API V1.22** 표면 호환.
+- 기준 구현: 플러그인 v0.1.8 / **Hucoms HTTP API V1.22** 표면 호환.
 - 함께 볼 문서: [`README.md`](../README.md)(플러그인 개요·모듈 구성), [`docs/INTEGRATION.md`](INTEGRATION.md)(프로젝트에 submodule로 세우는 절차). 이 문서는 **"세운 뒤 실제로 쓰고 통신하는 법"** 이다.
 
 ## 목차

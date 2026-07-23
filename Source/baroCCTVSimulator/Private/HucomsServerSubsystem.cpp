@@ -132,6 +132,10 @@ void UHucomsServerSubsystem::BuildChannels()
 		return;
 	}
 
+	// config 스포너: DefaultGame.ini 의 +SpawnCameras=(...) 로 지정한 높이별 카메라를 GetAllActorsOfClass
+	// 전에 스폰해, 같은 열거 패스에서 채널·포트를 받게 한다(자동스폰 선례와 동일 경로).
+	SpawnConfiguredCameras(World);
+
 	TArray<AActor*> Actors;
 	UGameplayStatics::GetAllActorsOfClass(World, APTZCamera::StaticClass(), Actors);
 
@@ -161,7 +165,9 @@ void UHucomsServerSubsystem::BuildChannels()
 		}
 	}
 
-	int32 Index = 0;
+	// AutoIndex 는 '자동 포트' 카메라에서만 증가한다. 명시 포트(config 스포너 카메라)는 인덱스를
+	// 소비하지 않으므로, 명시 카메라가 몇 대 섞여도 레벨의 자동 포트 카메라는 8081/8082… 순서를 유지한다.
+	int32 AutoIndex = 0;
 	for (AActor* A : Actors)
 	{
 		APTZCamera* Cam = Cast<APTZCamera>(A);
@@ -170,10 +176,11 @@ void UHucomsServerSubsystem::BuildChannels()
 			continue;
 		}
 
+		const bool bAutoPort = (Cam->HucomsHttpPort <= 0) || (Cam->HucomsMjpegPort <= 0);
 		TSharedPtr<FHucomsChannel> Ch = MakeShared<FHucomsChannel>();
 		Ch->Camera    = Cam;
-		Ch->HttpPort  = (Cam->HucomsHttpPort  > 0) ? Cam->HucomsHttpPort  : (BaseHttpPort  + Index);
-		Ch->MjpegPort = (Cam->HucomsMjpegPort > 0) ? Cam->HucomsMjpegPort : (BaseMjpegPort + Index);
+		Ch->HttpPort  = (Cam->HucomsHttpPort  > 0) ? Cam->HucomsHttpPort  : (BaseHttpPort  + AutoIndex);
+		Ch->MjpegPort = (Cam->HucomsMjpegPort > 0) ? Cam->HucomsMjpegPort : (BaseMjpegPort + AutoIndex);
 
 		// 홈 포즈 정렬: pan 은 설치 heading(+X)을 그대로 보게 0.
 		Ch->CurPan = Ch->TgtPan = 0;
@@ -192,7 +199,39 @@ void UHucomsServerSubsystem::BuildChannels()
 
 		ConfigureCameraForSim(Cam);
 		Channels.Add(Ch);
-		++Index;
+		if (bAutoPort) { ++AutoIndex; }
+	}
+}
+
+void UHucomsServerSubsystem::SpawnConfiguredCameras(UWorld* World)
+{
+	if (bConfigCamerasSpawned || !World)
+	{
+		return;
+	}
+	bConfigCamerasSpawned = true;
+
+	for (const FPTZCameraSpawnSpec& Spec : SpawnCameras)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		const FRotator Rot(Spec.PitchDeg, Spec.YawDeg, 0.f); // Pitch 는 BuildChannels 가 tilt 로 이관
+
+		APTZCamera* Cam = World->SpawnActor<APTZCamera>(APTZCamera::StaticClass(), Spec.Location, Rot, Params);
+		if (!Cam)
+		{
+			UE_LOG(LogHucomsSim, Error, TEXT("[Hucoms] config 카메라 스폰 실패 (%s @ %s)"), *Spec.Note, *Spec.Location.ToString());
+			continue;
+		}
+		Cam->bServeHucoms = true;
+		Cam->bFixedMode   = Spec.bFixedMode;
+		if (Spec.HttpPort  > 0) { Cam->HucomsHttpPort  = Spec.HttpPort; }
+		if (Spec.MjpegPort > 0) { Cam->HucomsMjpegPort = Spec.MjpegPort; }
+#if WITH_EDITOR
+		if (!Spec.Note.IsEmpty()) { Cam->SetActorLabel(FString::Printf(TEXT("PTZ_Spawn_%s"), *Spec.Note)); }
+#endif
+		UE_LOG(LogHucomsSim, Log, TEXT("[Hucoms] config 카메라 스폰: '%s' @ %s  http=%d mjpeg=%d"),
+			*Spec.Note, *Spec.Location.ToString(), Spec.HttpPort, Spec.MjpegPort);
 	}
 }
 
@@ -254,6 +293,8 @@ void UHucomsServerSubsystem::StartServers()
 		BindGet(TEXT("/cgi-bin/control/ptzf_status.cgi"),   &UHucomsServerSubsystem::HandlePtzfStatus);
 		BindGet(TEXT("/cgi-bin/control/ptz_centering.cgi"), &UHucomsServerSubsystem::HandlePtzCentering);
 		BindGet(TEXT("/cgi-bin/control/capabilityptz.cgi"), &UHucomsServerSubsystem::HandleCapabilityPtz);
+		BindGet(TEXT("/cgi-bin/control/pt_control.cgi"),    &UHucomsServerSubsystem::HandlePtControl);
+		BindGet(TEXT("/cgi-bin/control/zf_control.cgi"),    &UHucomsServerSubsystem::HandleZfControl);
 		BindGet(TEXT("/cgi-bin/image/jpeg.cgi"),            &UHucomsServerSubsystem::HandleJpeg);
 		BindGet(TEXT("/cgi-bin/image/mjpeg.cgi"),           &UHucomsServerSubsystem::HandleMjpeg);
 		BindGet(TEXT("/api/tuning"),                        &UHucomsServerSubsystem::HandleTuning);
@@ -348,6 +389,28 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 		}
 		else
 		{
+			// 연속(velocity) 이동: setptmove/setzfmove 로 설정된 속도가 있으면 Cur 를 직접 적분하고
+			// Tgt=Cur 로 동기해 아래 goto 슬루와 충돌하지 않게 한다. 한계 클램프 시 해당 축 자동 정지.
+			if (Ch.PanVel != 0.f)
+			{
+				Ch.CurPan = HucomsProtocol::WrapPan(Ch.CurPan + FMath::RoundToInt(Ch.PanVel * DeltaTime));
+				Ch.TgtPan = Ch.CurPan;
+			}
+			if (Ch.TiltVel != 0.f)
+			{
+				const int32 Raw = Ch.CurTilt + FMath::RoundToInt(Ch.TiltVel * DeltaTime);
+				const int32 New = HucomsProtocol::ClampTilt(Raw);
+				if (New != Raw) { Ch.TiltVel = 0.f; }   // 한계에서 클램프됨 -> 자동 정지
+				Ch.CurTilt = Ch.TgtTilt = New;
+			}
+			if (Ch.ZoomVel != 0.f)
+			{
+				const int32 Raw = Ch.CurZoom + FMath::RoundToInt(Ch.ZoomVel * DeltaTime);
+				const int32 New = HucomsProtocol::ClampZoom(Raw);
+				if (New != Raw) { Ch.ZoomVel = 0.f; }
+				Ch.CurZoom = Ch.TgtZoom = New;
+			}
+
 			// Pan: 0/35999 이음매를 넘어 최단 호로 이동.
 			{
 				const int32 D = HucomsProtocol::ShortestPanDiff(Ch.CurPan, Ch.TgtPan);
@@ -707,6 +770,9 @@ void UHucomsServerSubsystem::ApplyGoPtz(FHucomsChannel& Ch, const FHttpServerReq
 		return;
 	}
 
+	// 절대 이동은 진행 중인 연속(velocity) 이동을 취소한다(실기와 동일 — goto 가 jog 를 멈춘다).
+	Ch.PanVel = Ch.TiltVel = Ch.ZoomVel = 0.f;
+
 	// 절대 이동(go-to). 클라이언트는 panpos/tiltpos 항상, zoompos/focuspos 는 선택 전송.
 	if (HasQ(Req, TEXT("panpos")))   { Ch.TgtPan   = HucomsProtocol::WrapPan(GetQInt(Req, TEXT("panpos"), Ch.CurPan)); }
 	if (HasQ(Req, TEXT("tiltpos")))  { Ch.TgtTilt  = HucomsProtocol::ClampTilt(GetQInt(Req, TEXT("tiltpos"), Ch.CurTilt)); }
@@ -716,6 +782,81 @@ void UHucomsServerSubsystem::ApplyGoPtz(FHucomsChannel& Ch, const FHttpServerReq
 	UE_LOG(LogHucomsSim, Verbose, TEXT("[Hucoms] :%d goptzfpos -> pan=%d tilt=%d zoom=%d"), Ch.HttpPort, Ch.TgtPan, Ch.TgtTilt, Ch.TgtZoom);
 }
 
+//======================================================================================
+// 연속(velocity) PTZ — pt_control.cgi / zf_control.cgi (Hucoms 스펙 §8.2 / §8.3)
+//   실기: 방향(right/left/up/down/in/out) + 속도(1~100)로 모터를 계속 돌리다가 방향=stop 으로 정지.
+//   성공 = 빈 본문 200, 실패 = "Error:<설명>". goptzfpos(절대 이동)와 상호배타적(둘 중 하나가 다른 하나를 취소).
+//======================================================================================
+namespace
+{
+	// 방향 문자열 + 속도(1~100) -> 부호 있는 velocity(native units/sec). 정지/미지정은 nullptr 반환(무변경).
+	// PosDir/NegDir 는 raw Hucoms '증가/감소' 방향의 문자열.
+	bool ParseVelocity(const FString& Dir, int32 Speed, float MaxRate, const TCHAR* PosDir, const TCHAR* NegDir, float& OutVel)
+	{
+		if (Dir == TEXT("stop")) { OutVel = 0.f; return true; }
+		const float Frac = FMath::Clamp(Speed, 1, 100) / 100.f;
+		if (Dir == PosDir) { OutVel = +Frac * MaxRate; return true; }
+		if (Dir == NegDir) { OutVel = -Frac * MaxRate; return true; }
+		return false; // 미지정/알 수 없는 값 -> 이 축은 건드리지 않음
+	}
+}
+
+bool UHucomsServerSubsystem::HandlePtControl(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
+{
+	const FString Action = GetQ(Req, TEXT("action"));
+	if (Action != TEXT("setptmove"))
+	{
+		OnComplete(MakeText(TEXT("Error: invalid parameter\n")));
+		return true;
+	}
+	// 고정형: 명령 무시(성공 응답). 실기 고정형 CCTV 와 동일.
+	if (!Ch.bFixed)
+	{
+		// pan: right=+(우측, panpos↑) / left=-. tilt: down=+(아래, tiltpos↑) / up=-(위).
+		if (HasQ(Req, TEXT("pan")))
+		{
+			ParseVelocity(GetQ(Req, TEXT("pan")), GetQInt(Req, TEXT("panspeed"), 50),
+				PanSlewCdPerSec, TEXT("right"), TEXT("left"), Ch.PanVel);
+		}
+		if (HasQ(Req, TEXT("tilt")))
+		{
+			ParseVelocity(GetQ(Req, TEXT("tilt")), GetQInt(Req, TEXT("tiltspeed"), 50),
+				TiltSlewCdPerSec, TEXT("down"), TEXT("up"), Ch.TiltVel);
+		}
+		UE_LOG(LogHucomsSim, Verbose, TEXT("[Hucoms] :%d setptmove -> panVel=%.0f tiltVel=%.0f"), Ch.HttpPort, Ch.PanVel, Ch.TiltVel);
+	}
+	OnComplete(MakeText(FString())); // 성공: 빈 본문
+	return true;
+}
+
+bool UHucomsServerSubsystem::HandleZfControl(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
+{
+	const FString Action = GetQ(Req, TEXT("action"));
+	if (Action == TEXT("onepush"))
+	{
+		// 원-푸시 AF: sim 은 포커스가 항상 즉시 수렴이라 no-op 성공.
+		OnComplete(MakeText(FString()));
+		return true;
+	}
+	if (Action != TEXT("setzfmove"))
+	{
+		OnComplete(MakeText(TEXT("Error: invalid parameter\n")));
+		return true;
+	}
+	if (!Ch.bFixed)
+	{
+		// zoom: in=+(망원, zoompos↑) / out=-. focus 연속은 sim 에서 즉시 수렴이라 미지원(파라미터는 수용).
+		if (HasQ(Req, TEXT("zoom")))
+		{
+			ParseVelocity(GetQ(Req, TEXT("zoom")), GetQInt(Req, TEXT("zoomspeed"), 50),
+				ZoomSlewPerSec, TEXT("in"), TEXT("out"), Ch.ZoomVel);
+		}
+		UE_LOG(LogHucomsSim, Verbose, TEXT("[Hucoms] :%d setzfmove -> zoomVel=%.0f"), Ch.HttpPort, Ch.ZoomVel);
+	}
+	OnComplete(MakeText(FString()));
+	return true;
+}
+
 void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServerRequest& Req)
 {
 	// 고정형 카메라는 센터링(조준)도 무시한다 — 설치 자세로 고정.
@@ -723,6 +864,9 @@ void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServe
 	{
 		return;
 	}
+
+	// 센터링(절대 조준)도 진행 중인 연속 이동을 취소한다.
+	Ch.PanVel = Ch.TiltVel = Ch.ZoomVel = 0.f;
 
 	// 픽셀(1920x1080 논리 프레임) -> pan/tilt 델타. TAN 핀홀 + 구면 짐벌 모델로 실기 펌웨어 재현.
 	// 기준은 '현재 위치(Cur)' - 실기는 지금 보고 있는 자세에서 센터링한다.

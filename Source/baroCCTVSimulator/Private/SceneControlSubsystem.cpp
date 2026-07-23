@@ -10,6 +10,8 @@
 
 #include "Engine/World.h"
 #include "EngineUtils.h"                     // TActorIterator
+#include "Engine/HitResult.h"                // FHitResult (가시성 라인트레이스)
+#include "CollisionQueryParams.h"            // FCollisionQueryParams, ECC_Visibility
 #include "Components/ChildActorComponent.h"
 #include "Components/MeshComponent.h"         // UMeshComponent (차량 렌더 메시 aggregate bounds)
 #include "UObject/UnrealType.h"              // FIntProperty, FArrayProperty, FindFProperty, FScriptArrayHelper
@@ -270,6 +272,17 @@ namespace
 		return AssetName.Replace(TEXT("_"), TEXT(" "));
 	}
 
+	// 에셋명 -> 검출 클래스 라벨(car/truck/van). BP_Car.Mesh_List 에 클래스 메타가 없어 이름 기반 휴리스틱.
+	// 현재 23종에 버스는 없다(최대 승합=스타렉스=van). JS scene-control-client.mjs 와 동일하게 유지할 것.
+	FString CarAssetToClass(const FString& AssetName)
+	{
+		static const TCHAR* TruckKeys[] = { TEXT("봉고"), TEXT("탑차"), TEXT("포터") };
+		static const TCHAR* VanKeys[]   = { TEXT("스타렉스"), TEXT("카니발") };
+		for (const TCHAR* K : TruckKeys) { if (AssetName.Contains(K)) { return TEXT("truck"); } }
+		for (const TCHAR* K : VanKeys)   { if (AssetName.Contains(K)) { return TEXT("van"); } }
+		return TEXT("car");
+	}
+
 	// 실패 시 false + Out 비움. 성공 시 Out[i] = 인덱스 i 의 에셋명.
 	bool CollectCarAssetNames(UClass* CarCls, TArray<FString>& Out)
 	{
@@ -411,6 +424,40 @@ namespace
 		return C ? C->GetActorTransform() : FTransform::Identity;
 	}
 
+	// 대상 카메라 광학중심에서 차량 AABB 표본점 15개(중심+8코너+6면중심)로 라인트레이스해 가시 비율(0..1).
+	// 차량 자신은 무시 → '다른 물체(차/배경)에 의한 가림'만 측정한다(자기 실루엣 자가림은 제외).
+	// 주의: 씬 배경/차량에 Visibility 채널 콜리전이 없으면 트레이스가 막히지 않아 항상 1.0 이 나온다(라이브 검증 대상).
+	float ComputeVisibleRatio(UWorld* World, const APTZCamera* Cam, const AActor* CarActor)
+	{
+		if (!World || !Cam || !CarActor) { return 0.f; }
+		const FVector Eye = CameraOpticalTransform(Cam).GetLocation();
+		const FBox Box = CarActor->GetComponentsBoundingBox(/*bNonColliding=*/true);
+		if (!Box.IsValid) { return 0.f; }
+
+		const FVector Cn = Box.GetCenter();
+		const FVector Ex = Box.GetExtent();
+		TArray<FVector, TInlineAllocator<15>> Samples;
+		Samples.Add(Cn);
+		for (int32 sx = -1; sx <= 1; sx += 2)
+			for (int32 sy = -1; sy <= 1; sy += 2)
+				for (int32 sz = -1; sz <= 1; sz += 2)
+					Samples.Add(Cn + FVector(sx * Ex.X, sy * Ex.Y, sz * Ex.Z)); // 8 코너
+		Samples.Add(Cn + FVector(+Ex.X, 0, 0)); Samples.Add(Cn + FVector(-Ex.X, 0, 0)); // 6 면중심
+		Samples.Add(Cn + FVector(0, +Ex.Y, 0)); Samples.Add(Cn + FVector(0, -Ex.Y, 0));
+		Samples.Add(Cn + FVector(0, 0, +Ex.Z)); Samples.Add(Cn + FVector(0, 0, -Ex.Z));
+
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(BaroVisibility), /*bTraceComplex=*/false);
+		Params.AddIgnoredActor(CarActor);
+
+		int32 Visible = 0;
+		for (const FVector& P : Samples)
+		{
+			FHitResult Hit;
+			if (!World->LineTraceSingleByChannel(Hit, Eye, P, ECC_Visibility, Params)) { ++Visible; }
+		}
+		return Samples.Num() > 0 ? static_cast<float>(Visible) / static_cast<float>(Samples.Num()) : 0.f;
+	}
+
 	// 오버레이 투영에 필요한 것 중 "Hucoms 로 재현 불가능한" 부분만 노출한다 = 외부 파라미터(extrinsic).
 	//   mount.location : 광학중심 월드 위치. 피벗이 Root 와 동일위치(레버암 0)라 pan/tilt 에 불변 = 고정.
 	//   mount.baseYaw  : 설치 방위(pan=0 기준 yaw). 광학 yaw = baseYaw + CurrentPan 이므로 역산.
@@ -439,6 +486,12 @@ namespace
 		O->SetObjectField(TEXT("mount"), Mount);
 
 		O->SetNumberField(TEXT("wideHFovDeg"), C->BaseFOV);
+
+		// 시뮬 광학은 이상적 핀홀(rectilinear) — 왜곡 0, principal point = 프레임 중앙,
+		// roll 0(설계상 팬/틸트 피벗이 롤을 만들지 않음). 소비자는 focal_px = 0.5*W / tan(hfov/2) 로 계산.
+		O->SetStringField(TEXT("projection"), TEXT("pinhole"));
+		O->SetField(TEXT("distortion"), MakeShared<FJsonValueNull>());
+		O->SetNumberField(TEXT("rollDeg"), X.Rotator().Roll);
 
 		TSharedRef<FJsonObject> Intrinsics = MakeShared<FJsonObject>();
 		Intrinsics->SetStringField(TEXT("interpolation"), TEXT("linear"));
@@ -741,6 +794,7 @@ bool USceneControlSubsystem::HandleCatalog(const FHttpServerRequest& /*Req*/, co
 		C->SetNumberField(TEXT("index"), i);
 		C->SetStringField(TEXT("name"), CarAssetToDisplayName(CarAssets[i]));
 		C->SetStringField(TEXT("asset"), CarAssets[i]);
+		C->SetStringField(TEXT("class"), CarAssetToClass(CarAssets[i]));
 		if (CarBounds.IsValidIndex(i) && CarBounds[i].IsValid)
 		{
 			const FVector Center = CarBounds[i].GetCenter();
@@ -929,13 +983,39 @@ void USceneControlSubsystem::EvictSlotOccupant(const FString& SlotId)
 
 bool USceneControlSubsystem::HandleCars(const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete)
 {
-	// GET = 목록
+	// GET = 목록. 선택: ?visibility=<cameraId|hucomsPort> 이면 각 차량에 그 카메라 기준 visibleRatio(0..1) 를 실는다.
 	if (Req.Verb == EHttpServerRequestVerbs::VERB_GET)
 	{
+		const FString* VisParam = Req.QueryParams.Find(TEXT("visibility"));
+		const bool bWantVis = VisParam && !VisParam->IsEmpty();
+		APTZCamera* VisCam = nullptr;
+		if (bWantVis)
+		{
+			TArray<FCamEntry> Cams; CollectCameras(GetWorld(), Cams);
+			const bool bNumeric = VisParam->IsNumeric();
+			const int32 WantPort = bNumeric ? FCString::Atoi(**VisParam) : 0;
+			for (const FCamEntry& E : Cams)
+			{
+				if ((bNumeric && E.Http == WantPort) || (!bNumeric && E.Cam && E.Cam->GetName() == *VisParam))
+				{ VisCam = E.Cam; break; }
+			}
+			if (!VisCam) { OnComplete(JsonError(EHttpServerResponseCodes::NotFound, FString::Printf(TEXT("카메라 없음: %s"), **VisParam))); return true; }
+		}
+
 		TArray<TSharedPtr<FJsonValue>> Arr;
-		for (const TPair<FString, FSimCarState>& Pair : Cars) { Arr.Add(MakeShared<FJsonValueObject>(CarToJson(Pair.Value))); }
+		for (const TPair<FString, FSimCarState>& Pair : Cars)
+		{
+			TSharedRef<FJsonObject> CarObj = CarToJson(Pair.Value);
+			if (VisCam)
+			{
+				CarObj->SetNumberField(TEXT("visibleRatio"),
+					ComputeVisibleRatio(GetWorld(), VisCam, Pair.Value.Actor.Get()));
+			}
+			Arr.Add(MakeShared<FJsonValueObject>(CarObj));
+		}
 		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetArrayField(TEXT("cars"), Arr);
+		if (VisCam) { Root->SetStringField(TEXT("visibilityCamera"), VisCam->GetName()); }
 		OnComplete(JsonResp(Root));
 		return true;
 	}

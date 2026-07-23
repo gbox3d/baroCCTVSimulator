@@ -35,6 +35,11 @@ struct FHucomsChannel
 	int32 TgtPan = 0, TgtTilt = 0, TgtZoom = 0, TgtFocus = 0;
 	bool bPtEnable = true, bZfEnable = true;
 
+	// --- 연속(velocity) 이동 상태 (pt_control/zf_control setptmove) — 0 = 정지 ---
+	// 단위: pan/tilt = centi-deg/sec, zoom = tick/sec. 부호는 raw Hucoms 증감 방향
+	// (pan+ = 우측, tilt+ = 아래, zoom+ = 망원). goptzfpos/setcenter(절대 이동) 수신 시 0으로 리셋된다.
+	float PanVel = 0.f, TiltVel = 0.f, ZoomVel = 0.f;
+
 	// 고정형 카메라(APTZCamera::bFixedMode 복사). true 면 이 채널은 goptzfpos/setcenter 명령과
 	// 모터 슬루를 무시하고 설치 자세로 고정한다(스트림/스냅샷은 정상). capabilityptz 는 PTZ 미지원 광고.
 	bool bFixed = false;
@@ -47,6 +52,47 @@ struct FHucomsChannel
 	float FpsWindowAccum = 0.f;
 	int32 FpsWindowFrames = 0;
 	float MeasuredStreamFps = 0.f;
+};
+
+/**
+ * FPTZCameraSpawnSpec — DefaultGame.ini 로 런타임에 추가 스폰할 CCTV 카메라 1대의 명세.
+ *
+ * BuildChannels 최상단에서 GetAllActorsOfClass 전에 스폰되므로, 같은 열거 패스에서 채널·포트를
+ * 받아 /scene/cameras·Hucoms CGI·MJPEG 에 자동 노출된다(레벨 무수정으로 높이별 카메라 배치용).
+ * 포트는 반드시 명시한다 — 자동 포트(BaseHttpPort+index)는 액터 열거 순서에 좌우돼 비결정적이다.
+ */
+USTRUCT()
+struct FPTZCameraSpawnSpec
+{
+	GENERATED_BODY()
+
+	/** 광학중심 월드 위치(cm). 높이는 Z(예: 16 m = 1600). 피벗 레버암 0 이라 액터 위치 = 광학중심. */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	FVector Location = FVector::ZeroVector;
+
+	/** 설치 방위(월드 yaw, deg). 주차 행 중심을 조준한다. */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	float YawDeg = 0.f;
+
+	/** 설치 하향각(deg, 음수=아래). BuildChannels 가 tilt 로 이관한다(기본 -20 = 20도 하향). */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	float PitchDeg = -20.f;
+
+	/** Hucoms HTTP CGI 포트(명시 필수). */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	int32 HttpPort = 0;
+
+	/** 연속 MJPEG 스트림 포트(명시 필수, 8095 씬 제어 포트와 겹치지 말 것). */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	int32 MjpegPort = 0;
+
+	/** 고정형 카메라 여부(true 면 PTZ 명령 무시). */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	bool bFixedMode = false;
+
+	/** 식별 메모(에디터 라벨·로그용, 예: "16m"). */
+	UPROPERTY(EditAnywhere, Category = "Spawn")
+	FString Note;
 };
 
 /**
@@ -167,6 +213,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Camera")
 	bool bAutoSpawnCameraIfNone = true;
 
+	/**
+	 * 런타임에 추가 스폰할 카메라 목록(레벨 무수정 배치). DefaultGame.ini 의
+	 * [/Script/baroCCTVSimulator.HucomsServerSubsystem] 에서 +SpawnCameras=(...) 로 지정.
+	 * BEVHeight 파인튜닝용 높이별 카메라(8/12/16/20 m) 배치에 사용한다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Camera")
+	TArray<FPTZCameraSpawnSpec> SpawnCameras;
+
 	/** 연속 MJPEG 스트림 서버(RTSP 브리지 입력) 활성화. 채널마다 자기 MJPEG 포트에 하나씩. */
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Stream")
 	bool bEnableMjpegStream = true;
@@ -223,6 +277,7 @@ public:
 private:
 	bool bServersStarted = false;
 	bool bAutoSpawnAttempted = false;
+	bool bConfigCamerasSpawned = false;
 
 	// 카메라별 채널 (TSharedPtr 로 안정된 포인터 → 라우트 핸들러 람다가 캡처).
 	TArray<TSharedPtr<FHucomsChannel>> Channels;
@@ -232,6 +287,9 @@ private:
 
 	/** 레벨의 APTZCamera(bServeHucoms) 들을 열거해 채널을 만든다(포트 부여 + 카메라 sim 설정). */
 	void BuildChannels();
+
+	/** SpawnCameras(config) 명세대로 카메라를 런타임 스폰한다. BuildChannels 최상단에서 1회 호출. */
+	void SpawnConfiguredCameras(UWorld* World);
 
 	void ConfigureCameraForSim(APTZCamera* Cam);
 	void MirrorChannel(FHucomsChannel& Ch);
@@ -246,6 +304,11 @@ private:
 	bool HandlePtzfStatus(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 	bool HandlePtzCentering(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 	bool HandleCapabilityPtz(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
+
+	/** pt_control.cgi (action=setptmove) — 연속 Pan/Tilt velocity 제어(방향+속도, stop 으로 정지). */
+	bool HandlePtControl(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
+	/** zf_control.cgi (action=setzfmove/onepush) — 연속 Zoom/Focus velocity 제어. */
+	bool HandleZfControl(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 	bool HandleJpeg(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 	bool HandleMjpeg(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);
 

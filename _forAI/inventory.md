@@ -13,7 +13,7 @@
 
 - Name: `baroCCTVSimulator`
 - Path: `C:\works\ue_prjs\baroCCTVSimulator`
-- Summary: Unreal Engine 5.8 Runtime 플러그인. PTZ 카메라 짐벌, Hucoms 호환 HTTP/MJPEG 서버, 시뮬레이터 HUD, `/scene/*` 런타임 씬 제어 API를 제공한다. 현재 버전 **0.1.7**(`.uplugin` `VersionName` 이 단일 출처 — 여기 적을 땐 그 파일을 확인하고 쓸 것).
+- Summary: Unreal Engine 5.8 Runtime 플러그인. PTZ 카메라 짐벌, Hucoms 호환 HTTP/MJPEG 서버, 시뮬레이터 HUD, `/scene/*` 런타임 씬 제어 API를 제공한다. 현재 버전 **0.1.8**(`.uplugin` `VersionName` 이 단일 출처 — 여기 적을 땐 그 파일을 확인하고 쓸 것).
 - 검증 플랫폼: **Windows / Win64 전용**. Linux(Vulkan 오프스크린)는 VT 피드백 미동작으로 주차면 라인 데칼이 렌더되지 않아 보류 상태다.
 
 ## Top-level structure
