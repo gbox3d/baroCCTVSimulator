@@ -350,9 +350,9 @@ StreamWidth=1280
 StreamHeight=720
 StreamJpegQuality=80
 ; --- 렌더 자원 생명주기 (v0.1.9~) ---
-MaxActiveCameras=1          ; 동시에 켜 둘 카메라 수(0=상한 없음=레거시)
+MaxActiveCameras=1          ; 동시에 켜 둘 카메라 수(0=상한 없음=레거시). 2 이상이면 최근 사용 우선(LRU)
 MinWarmSeconds=5            ; 축출 유예 — 순회 폴링 churn 방지
-IdleReleaseSeconds=30       ; 마지막 사용 후 이만큼 지나면 끔(0=끄지 않음)
+IdleReleaseSeconds=10       ; 마지막 사용 후 이만큼 지나면 끔(0=끄지 않음)
 RecreateWarmupFrames=4      ; 콜드 재시작 첫 캡처에만 주는 워밍업
 ```
 
@@ -372,6 +372,14 @@ RecreateWarmupFrames=4      ; 콜드 재시작 첫 캡처에만 주는 워밍업
 > 상태 폴링(`getptzfpos`·`capabilityptz`)은 **수요로 치지 않는다** — 헬스체크가 전 채널을
 > 켜 두면 이 구조가 무효화된다. HUD 는 채널별로 `▶ 스트리밍 / 켜짐 / 꺼짐` 을 표시하므로
 > 누가 카메라를 쓰고 있는지 화면에서 바로 드러난다.
+>
+> **콜드 재시작 비용(설계상 수용).** 꺼진 카메라의 첫 스냅샷은 패키지 실측 **약 3초**가 걸린다
+> (warm 재요청은 0.24~0.34초). 내역은 **자원 생성 약 2.2초 + 워밍업 4프레임 약 0.75초**이며,
+> `RecreateWarmupFrames=0` 으로 워밍업을 없애도 2.25초라 **워밍업은 주범이 아니다** —
+> SceneCapture2D + 2560x1440 RenderTarget 할당과 첫 Lumen/셰이더 셋업이 대부분이다.
+> 따라서 워밍업을 깎아 얻는 이득(0.75초)보다 콜드 프레임 품질 손실 위험이 커서 **4를 유지한다**.
+> 콜드가 잦아 부담되면 워밍업이 아니라 `IdleReleaseSeconds` 를 소비자의 폴 간격보다 크게 올린다.
+> (`MaxActiveCameras=2` 이상으로 자주 쓰는 카메라들을 warm 으로 붙잡아 두는 것도 같은 효과.)
 
 > `WideHFovDeg`는 wide 프리셋의 수평 화각이다. 세로 화각은 같은 초점거리와 프레임 종횡비에서 유도하며 별도 `WideVFovDeg` 설정을 두지 않는다. `SetCenterFocalGain=1.0`은 기하학적으로 정확한 센터링이고, 실기 펌웨어의 초점거리 오차를 재현할 때만 조정한다.
 >

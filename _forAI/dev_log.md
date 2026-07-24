@@ -15,6 +15,8 @@
   - config: `MaxActiveCameras=1`(0=레거시) / `MinWarmSeconds=5` / `IdleReleaseSeconds=30` / `RecreateWarmupFrames=4`. 상태 폴링(`getptzfpos` 등)은 **수요가 아니다**(헬스체크가 전 채널을 켜 두면 무효화).
   - **`MinWarmSeconds` 유예는 필수다** — 없이 `MaxActiveCameras=1` 만 넣었더니 6대 순회 폴링과 충돌해 **1분에 173회 재생성** churn(원래보다 나쁨). 유예 적용 후 0회.
   - 실측(standalone -game, RTX 5060 8GB): GPU 3D **47.7% → 2.6%**, WorkingSet **21.6 → 12.9 GB**, Private **23.0 → 15.9 GB**. 유휴 30초 후 `카메라 끔 — 유휴 30초` 6줄. 카메라 전환 시 이전 1대만 `다른 카메라 사용` 으로 해제. warm 재요청 0.091s vs 콜드 0.191s.
+  - **콜드 재시작 비용 실측(워밍업을 깎지 않기로 한 근거)**: 꺼진 카메라 첫 스냅샷 약 3.0초 / warm 0.24~0.34초. `RecreateWarmupFrames=0` 으로 워밍업을 없애도 **2.25초** — 즉 워밍업(0.75초)이 아니라 **SceneCapture2D + 2560x1440 RT 할당과 첫 Lumen/셰이더 셋업(약 2.2초)이 주범**이다. 0.75초 벌자고 콜드 프레임 품질을 걸 이유가 없어 `RecreateWarmupFrames=4` 유지(이교수님 판단: "무리하게 줄일 필요 없다, 왜 그런지 문서화"). 콜드가 부담되면 `IdleReleaseSeconds` 를 폴 간격보다 크게 올리거나 `MaxActiveCameras` 를 늘린다.
+  - `MaxActiveCameras=2` 동작 검증(패키지, 커맨드라인 오버라이드만으로): 8083→8085 사용 시 축출 0건(둘 다 warm, 8083 재요청 0.343초로 확인), 세 번째 8086 사용 시 **가장 오래 안 쓴 8085 하나만** 해제 — LRU 정확. 앱 ini 는 `IdleReleaseSeconds=10`(이교수님 요청, 30초는 길다) 으로 확정.
   - 잔여: RT 지오메트리 always-resident 는 뷰와 무관한 별도 레버(`r.RayTracing.NumAlwaysResidentLODs`)로 남아 있다 — 필요 시 A/B 후 ini 반영.
 - 2026-07-20: **v0.1.6 — persistent ViewState 를 HWRT Lumen 가용 시에만 허용(UE5.8 SW Lumen 캡처 누수 근본 대응).**
   - UE 5.8 엔진 결함: 소프트웨어 Lumen(SDF 트레이싱) + persistent ViewState 를 가진 SceneCapture 조합에서 캡처 프레임마다 CPU 할당이 회수되지 않는다(LLM 태그 `DistanceFields`, 실측 +1.9~2.1MB/s @30fps 1280x720 — 35시간 가동 시 가상 72GiB OOM, 2026-07-16 현장). 라디언스캐시·스크린프로브 템포럴·서피스캐시 피드백·GDF 재캐시 억제·브릭 아틀라스 확대 cvar 전부 무효(A/B 10회 실측). Lumen GI off 또는 ViewState 제거 시에만 소멸.
