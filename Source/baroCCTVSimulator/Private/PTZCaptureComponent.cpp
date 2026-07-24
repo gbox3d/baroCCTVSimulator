@@ -47,7 +47,24 @@ UPTZCaptureComponent::UPTZCaptureComponent()
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
-bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
+UTextureRenderTarget2D* UPTZCaptureComponent::FindOrCreateRT(int32 Width, int32 Height)
+{
+	for (const TObjectPtr<UTextureRenderTarget2D>& RT : RenderTargets)
+	{
+		if (RT && RT->SizeX == Width && RT->SizeY == Height)
+		{
+			return RT;
+		}
+	}
+	// 렌더 타겟: 8비트 BGRA + sRGB (bForceLinearGamma=false). SCS_FinalColorLDR 와 짝.
+	UTextureRenderTarget2D* NewRT = NewObject<UTextureRenderTarget2D>(this);
+	NewRT->ClearColor = FLinearColor::Black;
+	NewRT->InitCustomFormat(Width, Height, PF_B8G8R8A8, /*bInForceLinearGamma=*/false);
+	RenderTargets.Add(NewRT);
+	return NewRT;
+}
+
+bool UPTZCaptureComponent::EnsureCaptureComp()
 {
 	if (!OwnerCam)
 	{
@@ -58,19 +75,6 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		UE_LOG(LogPTZCapture, Error, TEXT("[PTZCapture] 소유자가 CameraComp 를 가진 APTZCamera 가 아님: %s"),
 			*GetNameSafe(GetOwner()));
 		return false;
-	}
-
-	// 렌더 타겟: 8비트 BGRA + sRGB (bForceLinearGamma=false). SCS_FinalColorLDR 와 짝.
-	if (!RenderTarget || RtWidth != Width || RtHeight != Height)
-	{
-		if (!RenderTarget)
-		{
-			RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("HucomsCaptureRT"));
-			RenderTarget->ClearColor = FLinearColor::Black;
-		}
-		RenderTarget->InitCustomFormat(Width, Height, PF_B8G8R8A8, /*bInForceLinearGamma=*/false);
-		RtWidth = Width;
-		RtHeight = Height;
 	}
 
 	// 씬 캡처: 런타임 생성이므로 NewObject -> RegisterComponent -> AttachToComponent.
@@ -112,16 +116,21 @@ bool UPTZCaptureComponent::EnsureSetup(int32 Width, int32 Height)
 		CaptureComp->PostProcessSettings.bOverride_ReflectionMethod = true;
 		CaptureComp->PostProcessSettings.ReflectionMethod = EReflectionMethod::Lumen;
 	}
-	CaptureComp->TextureTarget = RenderTarget;
 	return true;
 }
 
-bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality, TArray64<uint8>& OutJpeg, int32 WarmupFrames, float ExposureBias, float Contrast)
+UTextureRenderTarget2D* UPTZCaptureComponent::PrepareCapture(int32 Width, int32 Height, float ExposureBias, float Contrast)
 {
-	if (!EnsureSetup(Width, Height))
+	if (!EnsureCaptureComp())
 	{
-		return false;
+		return nullptr;
 	}
+	UTextureRenderTarget2D* RT = FindOrCreateRT(Width, Height);
+	if (!RT)
+	{
+		return nullptr;
+	}
+	CaptureComp->TextureTarget = RT;
 
 	// 광학 줌 동기화 — 씬캡처 FOV 는 카메라를 자동으로 따라가지 않는다. 매 캡처 직전 필수.
 	// (Hucoms 서버가 MirrorToCamera 에서 카메라 FOV 를 HFOV(zoompos) 로 맞춰둔다.)
@@ -139,6 +148,25 @@ bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality,
 	CaptureComp->PostProcessSettings.bOverride_ColorContrast = true;
 	CaptureComp->PostProcessSettings.ColorContrast = FVector4(Contrast, Contrast, Contrast, 1.0);
 
+	return RT;
+}
+
+void UPTZCaptureComponent::RenderOnce()
+{
+	if (CaptureComp)
+	{
+		CaptureComp->CaptureScene();
+	}
+}
+
+bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality, TArray64<uint8>& OutJpeg, int32 WarmupFrames, float ExposureBias, float Contrast)
+{
+	UTextureRenderTarget2D* RT = PrepareCapture(Width, Height, ExposureBias, Contrast);
+	if (!RT)
+	{
+		return false;
+	}
+
 	// 캡처 워밍업: 노출/Lumen 리소스가 첫 readback 전에 안정될 시간을 준다. UE 5.8 Lumen
 	// ViewState 누수를 막기 위해 요청 간 temporal history는 보존하지 않는다.
 	const int32 Frames = FMath::Max(1, WarmupFrames + 1);
@@ -149,8 +177,11 @@ bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality,
 
 	// GetRenderTargetImage 는 내부에서 ReadPixels(렌더 명령 플러시 = 한 프레임 히치)를 수행하고
 	// RT 의 감마 공간(sRGB)을 FImage 에 태깅 -> CompressImage 까지 감마 처리 자동.
+	// 참고: 이 동기 경로는 스냅샷(jpeg.cgi) 전용이다. 연속 스트림은 서브시스템의 비동기
+	// 파이프라인(FRHIGPUTextureReadback — 게임 스레드 무정지)을 쓴다. ReadPixels 는 내부에서
+	// 디바이스 전역 GPU 드레인을 수행하므로(실측: 6대 스트림 중 26.8ms+ 블로킹) 고빈도 호출 금지.
 	FImage Image;
-	if (!FImageUtils::GetRenderTargetImage(RenderTarget, Image))
+	if (!FImageUtils::GetRenderTargetImage(RT, Image))
 	{
 		UE_LOG(LogPTZCapture, Error, TEXT("[PTZCapture] GetRenderTargetImage 실패"));
 		return false;
@@ -165,7 +196,7 @@ bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality,
 
 void UPTZCaptureComponent::ReleaseCaptureResources()
 {
-	if (!CaptureComp && !RenderTarget)
+	if (!CaptureComp && RenderTargets.Num() == 0)
 	{
 		return; // 이미 꺼져 있음 — 매 틱 호출돼도 무해.
 	}
@@ -177,15 +208,15 @@ void UPTZCaptureComponent::ReleaseCaptureResources()
 		CaptureComp->DestroyComponent();
 		CaptureComp = nullptr;
 	}
-	if (RenderTarget)
+	for (const TObjectPtr<UTextureRenderTarget2D>& RT : RenderTargets)
 	{
-		// GC 를 기다리지 않고 RT 의 GPU 메모리를 즉시 반납.
-		RenderTarget->ReleaseResource();
-		RenderTarget = nullptr;
+		if (RT)
+		{
+			// GC 를 기다리지 않고 RT 의 GPU 메모리를 즉시 반납.
+			RT->ReleaseResource();
+		}
 	}
-	// 다음 EnsureSetup 이 새로 할당하도록 해상도 캐시 무효화.
-	RtWidth = 0;
-	RtHeight = 0;
+	RenderTargets.Reset();
 
 	UE_LOG(LogPTZCapture, Verbose, TEXT("[PTZCapture] 렌더 자원 반납: %s"), *GetNameSafe(GetOwner()));
 }

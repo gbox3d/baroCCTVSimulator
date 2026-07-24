@@ -6,6 +6,27 @@
 
 ## Entries
 
+- 2026-07-24: **v0.1.10 — 연속 스트림 캡처를 비동기 GPU 리드백으로(품질 무손실). 6대 카메라당 +73%.**
+  - 발단: 6대 동시 MJPEG 카메라당 3.3fps·게임 틱 2.5fps. 이교수님 "품질 양보 불가, 구조적으로 개선".
+  - 4각도 적대적 검증(wf_4a5a001e)으로 오칭 정정: 병목은 `FImageUtils::GetRenderTargetImage`→
+    `ReadPixels` 내부의 **디바이스 전역 GPU 드레인**(`SubmitAndBlockUntilGPUIdle`)이 게임 스레드를
+    총 GPU 부하 비례로 블로킹(1대 7.9→6대 26.8ms+, 진짜 정상상태에선 432ms). "gpuwait 불변"은
+    `FlushRenderingCommands` 가 GPU 안 기다려서였고(오칭), GPU 실측은 6대 3D 80%·VRAM 94%.
+  - 구현: `FRHIGPUTextureReadback`(플러시·스톨 없음) + 워커 스레드 JPEG 인코딩. PTZCaptureComponent
+    를 PrepareCapture(뷰세팅+RT 반환)/RenderOnce 로 분해(동기 CaptureJpeg 는 스냅샷 전용 유지).
+    RT 를 크기별 분리(스트림 720p/스냅샷 1440p — 왕복 재할당 히치 제거). 서브시스템 Tick 3단
+    파이프라인: drain(완료 큐→UpdateFrame)/collect(IsReady→렌더스레드 Lock+de-pitch→워커 인코딩)/
+    submit(EnqueueCopy). 채널당 in-flight 1개(상태머신이 소비-후-재사용 보장). 완료 큐는
+    TSharedPtr<TQueue Mpsc>(워커는 포트·시퀀스·값복사만 참조 — UObject/Stream 무참조). 종료 규율:
+    in-flight 있으면 채널 파괴 전 FlushRenderingCommands. `bAsyncStreamCapture`(기본 True) 킬스위치.
+  - 안전 근거(검증): RT/ViewState 해제는 렌더커맨드 FIFO 로 EnqueueCopy 뒤 실행(crash 없음),
+    readback 객체는 게임스레드 즉시 delete 금지(flush 후), ImageWrapper 모듈 StartServers 선로딩,
+    화질 동일(BGRA8+sRGB, 감마는 태깅뿐 — 바이트 동일). v0.1.9 축출/유휴해제에 in-flight 가드 추가.
+  - 실측(RTX 5060, standalone): 1대 30fps·화질 육안 동일, **6대 3.3→5.7fps/대·19.7→34.2캡처/s(+73%,
+    검증 예측 +25% 초과)**, 게임 틱 2.5→24~60fps, 스트림 중 QHD 스냅샷 0.1s(히치 0), 6대 in-flight
+    중 정상종료 크래시 0. 계측(임시 FlushRenderingCommands 프로파일)은 제거함.
+  - 넘을 수 없는 벽: GPU 렌더 자체(6대 all-warm). 6×30fps 는 이 품질·이 GPU 에선 불가 — 후속은
+    캡처당 GPU 39ms 초선형 기전(VRAM eviction vs 뷰별 Lumen) 규명 시 추가 가능.
 - 2026-07-24: **v0.1.9 — 캡처 렌더 자원을 수요 기반 생명주기로 전환("쓰는 카메라만 켠다").**
   - 증상: 패키지 실행에서 클라이언트 0·캡처 0 인데 게임 틱 2.5 fps, GPU 3D 47.7%, RT 지오메트리 상주 1.245 GiB(예산 400 MiB) 초과, 텍스처 스트리밍 풀 초과.
   - 원인 ①: **release 경로가 `EndPlay` 뿐이었다.** 한 번이라도 캡처된 카메라는 SceneCapture2D + persistent ViewState(HWRT 가드로 on) + RT 를 종료까지 영구 상주. acquire 는 이미 지연 생성이라 "켜기만 하고 끄지 않는" 반쪽 구조였다.

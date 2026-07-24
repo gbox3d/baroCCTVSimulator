@@ -11,7 +11,7 @@
 ## 제품 기준선
 
 - Unreal Engine 5.8 Runtime 플러그인.
-- 현재 플러그인 버전: **0.1.9** (`baroCCTVSimulator.uplugin` `VersionName` — **단일 출처**).
+- 현재 플러그인 버전: **0.1.10** (`baroCCTVSimulator.uplugin` `VersionName` — **단일 출처**).
   이 문서에 버전을 적을 때는 반드시 `.uplugin`을 확인하고 쓴다. 0.1.2~0.1.5 동안 이 줄이 0.1.1로
   방치돼 `/scene/catalog.pluginVersion`(실제값)과 어긋나 있었다.
 - 검증 플랫폼: **Windows / Win64 전용**(2026-07-22 기준). 코드 자체는 크로스플랫폼 UE API만 쓰지만,

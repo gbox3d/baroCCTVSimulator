@@ -6,12 +6,29 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "IHttpRouter.h"          // IHttpRouter, FHttpRequestHandler, FHttpRouteHandle
 #include "HttpResultCallback.h"   // FHttpResultCallback
+#include "Containers/Queue.h"     // TQueue (완료 프레임 MPSC)
 #include "HucomsServerSubsystem.generated.h"
 
 class APTZCamera;
 class UPTZCaptureComponent;
 class FMjpegStreamServer;
+class FRHIGPUTextureReadback;
 struct FHttpServerRequest;
+
+/** 비동기 스트림 캡처의 채널 상태 머신(게임 스레드 소유). */
+enum class EStreamCapState : uint8
+{
+	Idle,      // 제출 가능
+	InFlight,  // EnqueueCopy 됨 — IsReady 대기 중
+};
+
+/** 워커 스레드에서 인코딩을 마친 스트림 프레임 — 게임 스레드 Tick 이 drain 해 MJPEG 로 송신. */
+struct FCompletedStreamFrame
+{
+	int32 HttpPort = 0;      // 어느 채널로 보낼지(포트로 조인 — UObject/포인터 참조 회피)
+	uint64 Seq = 0;          // 제출 시퀀스(역전 프레임 드랍 가드)
+	TArray<uint8> Jpeg;      // 완성된 JPEG 바이트
+};
 
 /**
  * FHucomsChannel — 한 APTZCamera = 한 Hucoms 서버 채널.
@@ -58,6 +75,15 @@ struct FHucomsChannel
 	// 상태 폴링(getptzfpos·capabilityptz)은 수요가 아니다 — 헬스체크가 전 채널을 켜 두면
 	// 재설계가 무효화된다. 센티널 음수라 월드 t≈0 에서 "방금 썼다"로 오탐하지 않는다.
 	double LastDemandTime = -1.0e9;
+
+	// --- 비동기 스트림 캡처(bAsyncStreamCapture=true) ---
+	// GPU→CPU 리드백을 게임 스레드 무정지로 수행(FRHIGPUTextureReadback). 채널당 in-flight 1개:
+	// 상태 머신이 "소비 후 재사용"을 보장하므로 링버퍼 불필요(프레임 유실 없음).
+	TUniquePtr<FRHIGPUTextureReadback> StreamReadback;
+	int32 ReadbackW = 0, ReadbackH = 0;                  // 현재 스테이징 크기
+	EStreamCapState StreamCapState = EStreamCapState::Idle;
+	uint64 StreamCapSeq = 0;                             // 제출 시퀀스(단조 증가)
+	uint64 LastDeliveredSeq = 0;                         // 마지막으로 UpdateFrame 한 시퀀스
 };
 
 /**
@@ -292,6 +318,18 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Lifecycle", meta = (ClampMin = "0", ClampMax = "32"))
 	int32 RecreateWarmupFrames = 4;
 
+	/**
+	 * 연속 MJPEG 스트림 캡처를 비동기 GPU 리드백으로 수행할지(v0.1.10~).
+	 *
+	 * true(기본): 스트림 프레임을 FRHIGPUTextureReadback 으로 회수 + JPEG 인코딩을 워커 스레드로
+	 *   → 게임 스레드가 캡처마다 GPU 완료를 동기 대기(실측 6대 26.8~432ms 블로킹)하지 않는다.
+	 *   품질은 바이트 단위로 동일(같은 렌더). 스트림에 1~2프레임 레이턴시(CCTV 무해).
+	 * false: 0.1.9 동기 경로(ReadPixels + 게임스레드 인코딩) — 롤백/비교용.
+	 * 스냅샷(jpeg.cgi)은 이 값과 무관하게 항상 동기(저빈도·즉시 응답).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Stream")
+	bool bAsyncStreamCapture = true;
+
 	//==================================================================================
 	// USubsystem / UWorldSubsystem / FTickableGameObject
 	//==================================================================================
@@ -367,6 +405,21 @@ private:
 
 	/** 채널의 렌더 자원을 반납한다(이미 꺼져 있으면 no-op). Reason 은 로그용. */
 	void ReleaseChannelCapture(FHucomsChannel& Ch, const TCHAR* Reason);
+
+	// --- 비동기 스트림 캡처 파이프라인(bAsyncStreamCapture=true) ---
+
+	/** 완료(인코딩 끝난) 프레임 큐 — 워커가 Enqueue, 게임 스레드 Tick 이 Dequeue. SharedPtr 라
+	 *  서브시스템 사후에도 워커가 안전하게 Enqueue(버려짐). */
+	TSharedPtr<TQueue<FCompletedStreamFrame, EQueueMode::Mpsc>, ESPMode::ThreadSafe> CompletedFrames;
+
+	/** 완료 큐를 비우며 각 프레임을 해당 채널 MJPEG 로 송신(게임 스레드). */
+	void DrainCompletedFrames();
+
+	/** InFlight 리드백이 준비됐으면 픽셀을 회수(렌더 스레드 Lock/복사) + 워커 인코딩 킥. 상태 Idle 복귀. */
+	void CollectStreamReadback(FHucomsChannel& Ch);
+
+	/** 스트림 프레임 1장 비동기 제출(PrepareCapture→RenderOnce→EnqueueCopy). 상태 InFlight. */
+	void SubmitStreamCapture(FHucomsChannel& Ch, bool bCold);
 
 	// --- CGI 핸들러 (채널별) ---
 	bool HandlePtzfStatus(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);

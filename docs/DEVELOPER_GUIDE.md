@@ -349,6 +349,7 @@ StreamFps=30
 StreamWidth=1280
 StreamHeight=720
 StreamJpegQuality=80
+bAsyncStreamCapture=True     ; 스트림 캡처 비동기 GPU 리드백(v0.1.10~, false=0.1.9 동기)
 ; --- 렌더 자원 생명주기 (v0.1.9~) ---
 MaxActiveCameras=1          ; 동시에 켜 둘 카메라 수(0=상한 없음=레거시). 2 이상이면 최근 사용 우선(LRU)
 MinWarmSeconds=5            ; 축출 유예 — 순회 폴링 churn 방지
@@ -372,6 +373,24 @@ RecreateWarmupFrames=4      ; 콜드 재시작 첫 캡처에만 주는 워밍업
 > 상태 폴링(`getptzfpos`·`capabilityptz`)은 **수요로 치지 않는다** — 헬스체크가 전 채널을
 > 켜 두면 이 구조가 무효화된다. HUD 는 채널별로 `▶ 스트리밍 / 켜짐 / 꺼짐` 을 표시하므로
 > 누가 카메라를 쓰고 있는지 화면에서 바로 드러난다.
+>
+> **연속 스트림 = 비동기 GPU 리드백(v0.1.10~, `bAsyncStreamCapture`).** 0.1.9 까지 스트림은
+> 캡처마다 `ReadPixels`(내부에서 디바이스 전역 GPU 드레인 + 게임 스레드 블로킹)로 프레임을
+> 회수했다. 6대 동시 스트림에서 이 동기 대기가 카메라당 26.8~432ms 로 폭증(GPU 총부하 비례)해
+> 게임 틱이 2.5fps 로 붕괴하고 카메라당 3.3fps 에 머물렀다. v0.1.10 은 스트림 프레임을
+> `FRHIGPUTextureReadback`(플러시·스톨 없는 비동기 리드백)으로 회수하고 JPEG 인코딩을 워커
+> 스레드로 옮긴다 — **게임 스레드는 렌더/리드백 명령만 큐잉하고 즉시 반환**한다. 파이프라인:
+> Tick 이 (1) 완료 큐 drain→MJPEG 송신, (2) in-flight 리드백 IsReady 면 회수(렌더스레드 Lock→
+> de-pitch 복사→워커 인코딩 킥), (3) StreamAccum 도달 && Idle 이면 제출(EnqueueCopy). 채널당
+> in-flight 1개(상태 머신이 소비-후-재사용 보장 → 링버퍼 불필요). **렌더는 동기 경로와 동일하므로
+> 화질은 바이트 단위로 같다**(BGRA8+sRGB, 감마는 태깅뿐). 스트림에 1~2프레임 레이턴시(CCTV 무해).
+> 스냅샷(jpeg.cgi)은 저빈도·즉시응답이라 동기 유지.
+>
+> 실측(RTX 5060 8GB, standalone): 6대 동시 스트림 카메라당 **3.3→5.7fps(+73%)**, 총 캡처
+> **19.7→34.2/s**, 게임 틱 **2.5→24~60fps**. 넘을 수 없는 벽은 GPU 렌더 자체(6대 all-warm =
+> GPU 3D 80%, VRAM 94%) — **6×30fps 는 이 품질·이 GPU 에선 불가**. 스냅샷/스트림이 서로 다른
+> 크기(1440p/720p)라 RT 를 크기별로 분리 보관해 스트림 중 스냅샷 시 재할당 히치도 없앴다.
+> 종료 규율: in-flight 있으면 채널 파괴 전 `FlushRenderingCommands` 1회(readback UAF 방지).
 >
 > **콜드 재시작 비용(설계상 수용).** 꺼진 카메라의 첫 스냅샷은 패키지 실측 **약 3초**가 걸린다
 > (warm 재요청은 0.24~0.34초). 내역은 **자원 생성 약 2.2초 + 워밍업 4프레임 약 0.75초**이며,

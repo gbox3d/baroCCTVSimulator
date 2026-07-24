@@ -20,6 +20,18 @@
 #include "Camera/CameraComponent.h"
 #include "ContentStreaming.h"   // IStreamingManager — CCTV 시점을 텍스처 스트리머에 등록
 
+// --- 비동기 스트림 캡처 파이프라인 ---
+#include "Engine/TextureRenderTarget2D.h"
+#include "TextureResource.h"           // FTextureRenderTargetResource
+#include "RenderingThread.h"           // ENQUEUE_RENDER_COMMAND, FlushRenderingCommands
+#include "RHIGPUReadback.h"            // FRHIGPUTextureReadback
+#include "RHICommandList.h"            // FRHICommandListImmediate, Transition
+#include "ImageUtils.h"                // FImageUtils::CompressImage
+#include "ImageCore.h"                 // FImage
+#include "Async/Async.h"               // AsyncTask
+#include "Modules/ModuleManager.h"     // ImageWrapper 선로딩
+#include "IImageWrapperModule.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogHucomsSim, Log, All);
 
 //======================================================================================
@@ -252,6 +264,14 @@ void UHucomsServerSubsystem::StartServers()
 		return;
 	}
 
+	// 비동기 스트림 인코딩을 워커 스레드에서 하려면 ImageWrapper 모듈이 게임 스레드에서 미리
+	// 로드돼 있어야 한다(FImageUtils::CompressImage 는 비게임스레드면 GetModulePtr 만 씀 → null 이면 실패).
+	if (bAsyncStreamCapture)
+	{
+		FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+		CompletedFrames = MakeShared<TQueue<FCompletedStreamFrame, EQueueMode::Mpsc>, ESPMode::ThreadSafe>();
+	}
+
 	FHttpServerModule& Http = FHttpServerModule::Get();
 	int32 StartedCount = 0;
 
@@ -324,6 +344,27 @@ void UHucomsServerSubsystem::StartServers()
 
 void UHucomsServerSubsystem::StopServers()
 {
+	// 비동기 리드백 종료 규율: 채널을 파괴하기 전에 in-flight 렌더커맨드(EnqueueCopy/Lock)를
+	// 전부 완료시킨다. 이 커맨드들이 채널 소유 FRHIGPUTextureReadback 을 raw 로 물고 있어,
+	// flush 없이 파괴하면 use-after-free 다. flush 후에는 pending 커맨드가 없어 게임스레드
+	// 파괴(TUniquePtr)가 안전하다. (워커 인코딩 태스크는 값복사만 참조 — 채널과 무관.)
+	if (bAsyncStreamCapture)
+	{
+		bool bAnyInFlight = false;
+		for (const TSharedPtr<FHucomsChannel>& ChPtr : Channels)
+		{
+			if (ChPtr.IsValid() && ChPtr->StreamCapState != EStreamCapState::Idle)
+			{
+				bAnyInFlight = true;
+				break;
+			}
+		}
+		if (bAnyInFlight)
+		{
+			FlushRenderingCommands();
+		}
+	}
+
 	for (TSharedPtr<FHucomsChannel>& ChPtr : Channels)
 	{
 		FHucomsChannel& Ch = *ChPtr;
@@ -378,6 +419,12 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 	// 렌더 자원 생명주기 판정용 현재 시각(월드 시간, 초).
 	const UWorld* TickWorld = GetWorld();
 	const double Now = TickWorld ? TickWorld->GetTimeSeconds() : 0.0;
+
+	// 워커가 인코딩을 끝낸 스트림 프레임을 MJPEG 로 송신(게임 스레드).
+	if (bAsyncStreamCapture)
+	{
+		DrainCompletedFrames();
+	}
 
 	for (TSharedPtr<FHucomsChannel>& ChPtr : Channels)
 	{
@@ -441,8 +488,19 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 		const bool bHasClients = Ch.Stream && Ch.Stream->HasClients();
 		bool bWarm = IsChannelWarm(Ch);
 
+		// 비동기: 완료된 in-flight 리드백은 클라이언트 유무와 무관하게 회수한다 — 클라이언트가
+		// 방금 끊긴 채널도 마지막 프레임을 끝내고 Idle 로 돌아와야 유휴 해제가 안전하다.
+		if (bAsyncStreamCapture && Ch.StreamCapState == EStreamCapState::InFlight
+			&& Ch.StreamReadback.IsValid() && Ch.StreamReadback->IsReady())
+		{
+			CollectStreamReadback(Ch);
+		}
+
 		// 유휴 해제: 아무도 안 보고, 마지막 사용에서 IdleReleaseSeconds 가 지났으면 끈다.
+		// 단 in-flight 리드백이 있으면(비동기) 완료까지 미룬다 — RT 파괴는 렌더 FIFO 로 안전하나
+		// 상태를 깔끔히 두기 위해.
 		if (bWarm && !bHasClients && IdleReleaseSeconds > 0.f
+			&& Ch.StreamCapState == EStreamCapState::Idle
 			&& (Now - Ch.LastDemandTime) > static_cast<double>(IdleReleaseSeconds))
 		{
 			ReleaseChannelCapture(Ch, *FString::Printf(TEXT("유휴 %.0f초"), Now - Ch.LastDemandTime));
@@ -481,20 +539,32 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 				Ch.StreamAccum = FMath::Min(Ch.StreamAccum - Interval, Interval);
 				if (UPTZCaptureComponent* Cap = ResolveCapture(Ch.Camera.Get()))
 				{
-					// 꺼져 있다 다시 켜지는 첫 프레임만 워밍업(CaptureJpeg 가 자원을 만들기 전에 판정).
-					const int32 Warmup = Cap->HasCaptureResources() ? 0 : RecreateWarmupFrames;
+					// 꺼져 있다 다시 켜지는 첫 프레임만 워밍업(자원 생성 전에 판정).
+					const bool bCold = !Cap->HasCaptureResources();
 					// 이 카메라를 쓴다 → 수요 기록 + 다른 카메라 끄기(VRAM 을 먼저 비우고 할당).
 					StampDemand(Ch);
 
-					TArray64<uint8> Jpeg;
-					// 스냅샷(jpeg.cgi)과 동일한 노출/대비 보정을 연속 스트림에도 적용 —
-					// 안 그러면 튜닝 슬라이더를 움직여도 이 경로를 보는 화면은 안 바뀐다.
-					if (Cap->CaptureJpeg(StreamWidth, StreamHeight, StreamJpegQuality, Jpeg, Warmup, CaptureExposureBias, CaptureContrast) && Jpeg.Num() > 0)
+					if (bAsyncStreamCapture)
 					{
-						TArray<uint8> Frame;
-						Frame.Append(Jpeg.GetData(), IntCastChecked<int32>(Jpeg.Num()));
-						Ch.Stream->UpdateFrame(Frame);
-						++Ch.FpsWindowFrames;
+						// 비동기: Idle 일 때만 제출(이전 프레임이 in-flight 면 이 슬롯은 건너뜀).
+						// 완성 프레임은 DrainCompletedFrames 가 UpdateFrame + FpsWindowFrames 처리.
+						if (Ch.StreamCapState == EStreamCapState::Idle)
+						{
+							SubmitStreamCapture(Ch, bCold);
+						}
+					}
+					else
+					{
+						// 동기(레거시): 게임 스레드가 GPU 완료까지 블로킹. 롤백/비교용.
+						const int32 Warmup = bCold ? RecreateWarmupFrames : 0;
+						TArray64<uint8> Jpeg;
+						if (Cap->CaptureJpeg(StreamWidth, StreamHeight, StreamJpegQuality, Jpeg, Warmup, CaptureExposureBias, CaptureContrast) && Jpeg.Num() > 0)
+						{
+							TArray<uint8> Frame;
+							Frame.Append(Jpeg.GetData(), IntCastChecked<int32>(Jpeg.Num()));
+							Ch.Stream->UpdateFrame(Frame);
+							++Ch.FpsWindowFrames;
+						}
 					}
 				}
 			}
@@ -675,6 +745,10 @@ void UHucomsServerSubsystem::StampDemand(FHucomsChannel& Ch)
 		{
 			continue; // 방금 썼다 — 유예.
 		}
+		if (Other->StreamCapState != EStreamCapState::Idle)
+		{
+			continue; // 비동기 리드백 in-flight — 완료(Idle) 후 유휴 해제가 처리.
+		}
 		if (IsChannelWarm(*Other))
 		{
 			Warm.Add(Other);
@@ -696,6 +770,160 @@ void UHucomsServerSubsystem::StampDemand(FHucomsChannel& Ch)
 	{
 		ReleaseChannelCapture(*Warm[i], TEXT("다른 카메라 사용"));
 	}
+}
+
+//======================================================================================
+// 비동기 스트림 캡처 파이프라인 (게임 스레드 무정지 GPU 리드백 + 워커 인코딩)
+//======================================================================================
+void UHucomsServerSubsystem::DrainCompletedFrames()
+{
+	if (!CompletedFrames.IsValid())
+	{
+		return;
+	}
+	FCompletedStreamFrame Frame;
+	while (CompletedFrames->Dequeue(Frame))
+	{
+		// 포트로 채널 조인(UObject/포인터 참조 회피 — 워커는 포트·시퀀스만 안다).
+		for (const TSharedPtr<FHucomsChannel>& ChPtr : Channels)
+		{
+			FHucomsChannel* Ch = ChPtr.Get();
+			if (!Ch || Ch->HttpPort != Frame.HttpPort)
+			{
+				continue;
+			}
+			// 역전 프레임 드랍(단일 in-flight 라 사실상 항상 증가 — belt-and-suspenders).
+			if (Frame.Seq > Ch->LastDeliveredSeq && Ch->Stream)
+			{
+				Ch->Stream->UpdateFrame(Frame.Jpeg);
+				Ch->LastDeliveredSeq = Frame.Seq;
+				++Ch->FpsWindowFrames;
+			}
+			break;
+		}
+	}
+}
+
+void UHucomsServerSubsystem::SubmitStreamCapture(FHucomsChannel& Ch, bool bCold)
+{
+	UPTZCaptureComponent* Cap = ResolveCapture(Ch.Camera.Get());
+	if (!Cap)
+	{
+		return;
+	}
+	// 스냅샷과 동일한 노출/대비 보정을 스트림에도 적용(튜닝 정합) — 같은 렌더 = 같은 화질.
+	UTextureRenderTarget2D* RT = Cap->PrepareCapture(StreamWidth, StreamHeight, CaptureExposureBias, CaptureContrast);
+	if (!RT)
+	{
+		return;
+	}
+	// 꺼져 있다 켜지는 첫 프레임만 워밍업(Lumen/노출 히스토리가 프레임 0 이라 뜨는 것 보정).
+	if (bCold)
+	{
+		for (int32 i = 0; i < RecreateWarmupFrames; ++i)
+		{
+			Cap->RenderOnce();
+		}
+	}
+	Cap->RenderOnce(); // 이 프레임 렌더 큐잉
+
+	// 리드백 스테이징 확보 — 스트림은 크기 고정이라 최초 1회만 생성.
+	if (!Ch.StreamReadback.IsValid() || Ch.ReadbackW != StreamWidth || Ch.ReadbackH != StreamHeight)
+	{
+		if (Ch.StreamReadback.IsValid())
+		{
+			FlushRenderingCommands(); // 크기 변경(희귀) — 옛 readback 참조 커맨드 소진 후 교체.
+		}
+		Ch.StreamReadback = MakeUnique<FRHIGPUTextureReadback>(TEXT("HucomsStreamReadback"));
+		Ch.ReadbackW = StreamWidth;
+		Ch.ReadbackH = StreamHeight;
+	}
+
+	FTextureRenderTargetResource* RTResource = RT->GameThread_GetRenderTargetResource();
+	if (!RTResource)
+	{
+		return;
+	}
+	FRHIGPUTextureReadback* Readback = Ch.StreamReadback.Get();
+	const int32 W = StreamWidth, H = StreamHeight;
+
+	ENQUEUE_RENDER_COMMAND(HucomsEnqueueStreamCopy)(
+		[Readback, RTResource, W, H](FRHICommandListImmediate& RHICmdList)
+		{
+			FRHITexture* Tex = RTResource->TextureRHI;
+			if (!Tex)
+			{
+				return;
+			}
+			// SceneCapture 후 RT 는 SRVMask — 복사원 상태로 전이 후 복사, 다시 SRV 로 복귀.
+			RHICmdList.Transition(FRHITransitionInfo(Tex, ERHIAccess::SRVMask, ERHIAccess::CopySrc));
+			Readback->EnqueueCopy(RHICmdList, Tex, FIntVector(0, 0, 0), 0, FIntVector(W, H, 1));
+			RHICmdList.Transition(FRHITransitionInfo(Tex, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+		});
+
+	Ch.StreamCapState = EStreamCapState::InFlight;
+	++Ch.StreamCapSeq;
+}
+
+void UHucomsServerSubsystem::CollectStreamReadback(FHucomsChannel& Ch)
+{
+	FRHIGPUTextureReadback* Readback = Ch.StreamReadback.Get();
+	if (!Readback)
+	{
+		Ch.StreamCapState = EStreamCapState::Idle;
+		return;
+	}
+	const int32 W = Ch.ReadbackW, H = Ch.ReadbackH;
+	const int32 Quality = StreamJpegQuality;   // 제출 시점 공유 멤버 스냅샷.
+	const int32 Port = Ch.HttpPort;
+	const uint64 Seq = Ch.StreamCapSeq;
+	TSharedPtr<TQueue<FCompletedStreamFrame, EQueueMode::Mpsc>, ESPMode::ThreadSafe> Queue = CompletedFrames;
+
+	ENQUEUE_RENDER_COMMAND(HucomsCollectStreamReadback)(
+		[Readback, W, H, Quality, Port, Seq, Queue](FRHICommandListImmediate& RHICmdList)
+		{
+			int32 RowPitchPixels = 0;
+			void* Mapped = Readback->Lock(RowPitchPixels, nullptr);
+			if (!Mapped)
+			{
+				return;
+			}
+			// de-pitch: 스테이징 row stride(픽셀) 가 W 보다 클 수 있어 행 단위 복사(소유 버퍼로).
+			TArray64<uint8> Pixels;
+			Pixels.SetNumUninitialized(static_cast<int64>(W) * H * 4);
+			const uint8* Src = static_cast<const uint8*>(Mapped);
+			uint8* Dst = Pixels.GetData();
+			const int32 RowBytes = W * 4;
+			const int64 SrcPitchBytes = static_cast<int64>(RowPitchPixels) * 4;
+			for (int32 y = 0; y < H; ++y)
+			{
+				FMemory::Memcpy(Dst + static_cast<int64>(y) * RowBytes, Src + static_cast<int64>(y) * SrcPitchBytes, RowBytes);
+			}
+			Readback->Unlock();
+
+			// JPEG 인코딩은 워커 스레드로(게임 스레드 무부하). 값복사만 참조 — UObject/채널 무관.
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+				[Pixels = MoveTemp(Pixels), W, H, Quality, Port, Seq, Queue]() mutable
+				{
+					FImage Image;
+					// BGRA8 + sRGB: 기존 GetRenderTargetImage 경로와 바이트 동일(감마는 태깅뿐).
+					Image.Init(W, H, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+					FMemory::Memcpy(Image.RawData.GetData(), Pixels.GetData(), static_cast<int64>(W) * H * 4);
+					TArray64<uint8> Jpeg;
+					if (FImageUtils::CompressImage(Jpeg, TEXT("jpg"), Image, Quality) && Jpeg.Num() > 0 && Queue.IsValid())
+					{
+						FCompletedStreamFrame Done;
+						Done.HttpPort = Port;
+						Done.Seq = Seq;
+						Done.Jpeg.Append(Jpeg.GetData(), IntCastChecked<int32>(Jpeg.Num()));
+						Queue->Enqueue(MoveTemp(Done));
+					}
+				});
+		});
+
+	// 다음 제출 허용. 렌더 FIFO 상 이 collect(Lock/Unlock) 가 다음 EnqueueCopy 보다 먼저 실행되므로
+	// readback 재사용에 프레임 유실이 없다.
+	Ch.StreamCapState = EStreamCapState::Idle;
 }
 
 bool UHucomsServerSubsystem::RenderSnapshotJpeg(FHucomsChannel& Ch, TArray<uint8>& OutBytes)

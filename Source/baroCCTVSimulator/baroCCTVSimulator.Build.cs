@@ -25,7 +25,7 @@ public class baroCCTVSimulator : ModuleRules
 		//   - RHI:                 GRHISupportsRayTracing — persistent ViewState 허용 판정(PTZCaptureComponent)
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"Json", "Sockets", "Networking", "ImageCore", "Projects", "RHI"
+			"Json", "Sockets", "Networking", "ImageCore", "Projects", "RHI", "RenderCore", "ImageWrapper"
 		});
 	}
 }
