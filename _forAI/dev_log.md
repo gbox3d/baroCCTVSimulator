@@ -6,6 +6,16 @@
 
 ## Entries
 
+- 2026-07-24: **v0.1.9 — 캡처 렌더 자원을 수요 기반 생명주기로 전환("쓰는 카메라만 켠다").**
+  - 증상: 패키지 실행에서 클라이언트 0·캡처 0 인데 게임 틱 2.5 fps, GPU 3D 47.7%, RT 지오메트리 상주 1.245 GiB(예산 400 MiB) 초과, 텍스처 스트리밍 풀 초과.
+  - 원인 ①: **release 경로가 `EndPlay` 뿐이었다.** 한 번이라도 캡처된 카메라는 SceneCapture2D + persistent ViewState(HWRT 가드로 on) + RT 를 종료까지 영구 상주. acquire 는 이미 지연 생성이라 "켜기만 하고 끄지 않는" 반쪽 구조였다.
+  - 원인 ②: `Tick` 이 `IStreamingManager::AddViewInformation` 을 **전 채널 무조건 매 틱** 호출 — 아무도 안 보는 카메라의 원거리 텍스처까지 고해상도 mip 상주.
+  - 원인 ③(진짜 방아쇠): **DGX(192.168.0.220) 의 uvicorn 이 6대 jpeg.cgi 를 HTTP keep-alive 로 상시 순회 폴링**하고 있었다. HUD 는 MJPEG 클라이언트만 세어 "클라이언트 없음, 캡처 0" 으로 보였다 — 유휴로 오인한 상태가 실제로는 6대 전부 사용 중이었다. keep-alive 라 연결의 원격 포트가 안 바뀌어 "연결만 남았다" 로 오판하기 쉽다(원격 포트 불변 ≠ 요청 없음).
+  - 수정: `UPTZCaptureComponent::ReleaseCaptureResources()`/`HasCaptureResources()` 신설(`DestroyComponent` → `OnUnregister` 가 ViewState 파괴, `RenderTarget->ReleaseResource()` 로 GC 대기 없이 VRAM 반납, `RtWidth/Height` 무효화 → 다음 `EnsureSetup` 이 재생성). `FHucomsChannel::LastDemandTime` + `StampDemand()`/`ReleaseChannelCapture()`. 캡처 진입점이 정확히 2곳(스트림 분기, `RenderSnapshotJpeg`)뿐임을 전수 확인해 그 2곳 + PTZ 이동 4핸들러에만 스탬프. `AddViewInformation` 을 "켜진 카메라"로 게이트. HUD 3상태(▶스트리밍/켜짐/꺼짐).
+  - config: `MaxActiveCameras=1`(0=레거시) / `MinWarmSeconds=5` / `IdleReleaseSeconds=30` / `RecreateWarmupFrames=4`. 상태 폴링(`getptzfpos` 등)은 **수요가 아니다**(헬스체크가 전 채널을 켜 두면 무효화).
+  - **`MinWarmSeconds` 유예는 필수다** — 없이 `MaxActiveCameras=1` 만 넣었더니 6대 순회 폴링과 충돌해 **1분에 173회 재생성** churn(원래보다 나쁨). 유예 적용 후 0회.
+  - 실측(standalone -game, RTX 5060 8GB): GPU 3D **47.7% → 2.6%**, WorkingSet **21.6 → 12.9 GB**, Private **23.0 → 15.9 GB**. 유휴 30초 후 `카메라 끔 — 유휴 30초` 6줄. 카메라 전환 시 이전 1대만 `다른 카메라 사용` 으로 해제. warm 재요청 0.091s vs 콜드 0.191s.
+  - 잔여: RT 지오메트리 always-resident 는 뷰와 무관한 별도 레버(`r.RayTracing.NumAlwaysResidentLODs`)로 남아 있다 — 필요 시 A/B 후 ini 반영.
 - 2026-07-20: **v0.1.6 — persistent ViewState 를 HWRT Lumen 가용 시에만 허용(UE5.8 SW Lumen 캡처 누수 근본 대응).**
   - UE 5.8 엔진 결함: 소프트웨어 Lumen(SDF 트레이싱) + persistent ViewState 를 가진 SceneCapture 조합에서 캡처 프레임마다 CPU 할당이 회수되지 않는다(LLM 태그 `DistanceFields`, 실측 +1.9~2.1MB/s @30fps 1280x720 — 35시간 가동 시 가상 72GiB OOM, 2026-07-16 현장). 라디언스캐시·스크린프로브 템포럴·서피스캐시 피드백·GDF 재캐시 억제·브릭 아틀라스 확대 cvar 전부 무효(A/B 10회 실측). Lumen GI off 또는 ViewState 제거 시에만 소멸.
   - v0.1.5(persist 무조건 off)는 누수는 잡지만 ViewState 가 없으면 캡처에서 Lumen 자체가 비활성이라 암부가 뭉개진다(clipLo 15.2%→18.4% 실측) — 화질 회귀로 대체.

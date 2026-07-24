@@ -35,6 +35,19 @@ public:
 	 */
 	bool CaptureJpeg(int32 Width, int32 Height, int32 Quality, TArray64<uint8>& OutJpeg, int32 WarmupFrames = 0, float ExposureBias = 0.f, float Contrast = 1.f);
 
+	/**
+	 * 렌더 자원(SceneCapture2D + RenderTarget)을 즉시 반납한다 — "카메라를 끈다".
+	 *
+	 * 이게 없으면 한 번이라도 캡처된 카메라는 EndPlay 까지 persistent ViewState(Lumen/TSR/노출
+	 * 히스토리)와 RT 상주를 영구히 물고 있어, 아무도 안 보는 카메라가 GPU 를 계속 태운다.
+	 * DestroyComponent 는 OnUnregister 를 태워 ViewState 를 즉시 파괴하는 엔진 공식 경로다.
+	 * 다음 CaptureJpeg 호출 시 EnsureSetup 이 전부 null 가드라 자동으로 재생성된다(콜드 시작).
+	 */
+	void ReleaseCaptureResources();
+
+	/** 렌더 자원이 현재 살아있는가(= 켜져 있는가). 콜드 재생성 판정용. */
+	bool HasCaptureResources() const { return CaptureComp != nullptr; }
+
 protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 

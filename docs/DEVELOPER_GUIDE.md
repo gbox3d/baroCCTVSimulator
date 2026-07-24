@@ -349,7 +349,29 @@ StreamFps=30
 StreamWidth=1280
 StreamHeight=720
 StreamJpegQuality=80
+; --- 렌더 자원 생명주기 (v0.1.9~) ---
+MaxActiveCameras=1          ; 동시에 켜 둘 카메라 수(0=상한 없음=레거시)
+MinWarmSeconds=5            ; 축출 유예 — 순회 폴링 churn 방지
+IdleReleaseSeconds=30       ; 마지막 사용 후 이만큼 지나면 끔(0=끄지 않음)
+RecreateWarmupFrames=4      ; 콜드 재시작 첫 캡처에만 주는 워밍업
 ```
+
+> **렌더 자원 생명주기(v0.1.9~)** — 0.1.8 까지는 한 번이라도 캡처된 카메라가 종료까지
+> SceneCapture + persistent ViewState + 텍스처 시점 등록을 영구히 물고 있었다(해제 경로가
+> `EndPlay` 뿐). 카메라가 늘어날수록 아무도 안 보는데도 GPU 가 쌓인다 — 6대 기준 실측
+> GPU 3D 47.7%, RT 지오메트리 1.245 GiB(예산 400 MiB) 초과, 게임 틱 2.5 fps.
+>
+> v0.1.9 는 **쓰는 카메라만 켠다**: 캡처·PTZ 이동이 있을 때 그 카메라를 "사용 중"으로
+> 표시하고, `MaxActiveCameras` 를 넘긴 다른 카메라와 `IdleReleaseSeconds` 가 지난 카메라의
+> 자원을 반납한다(`UPTZCaptureComponent::ReleaseCaptureResources`). **MJPEG 클라이언트가 붙은
+> 채널과 `MinWarmSeconds` 이내에 쓴 채널은 축출하지 않는다** — 여러 카메라를 번갈아 쓰는
+> 소비자(검출기의 순회 폴링 등)에서 껐다 켜는 churn 이 나면 오히려 더 무겁기 때문이다
+> (유예 없이 실측 시 1분에 173회 재생성). 실측 결과 GPU 3D **47.7% → 2.6%**, 프로세스
+> WorkingSet **21.6 GB → 12.9 GB**.
+>
+> 상태 폴링(`getptzfpos`·`capabilityptz`)은 **수요로 치지 않는다** — 헬스체크가 전 채널을
+> 켜 두면 이 구조가 무효화된다. HUD 는 채널별로 `▶ 스트리밍 / 켜짐 / 꺼짐` 을 표시하므로
+> 누가 카메라를 쓰고 있는지 화면에서 바로 드러난다.
 
 > `WideHFovDeg`는 wide 프리셋의 수평 화각이다. 세로 화각은 같은 초점거리와 프레임 종횡비에서 유도하며 별도 `WideVFovDeg` 설정을 두지 않는다. `SetCenterFocalGain=1.0`은 기하학적으로 정확한 센터링이고, 실기 펌웨어의 초점거리 오차를 재현할 때만 조정한다.
 >

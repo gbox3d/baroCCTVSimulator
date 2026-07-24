@@ -375,6 +375,10 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 	const int32 ZoomStep = FMath::Max(1, FMath::RoundToInt(ZoomSlewPerSec   * DeltaTime));
 	const float Interval = 1.f / FMath::Max(1, StreamFps);
 
+	// 렌더 자원 생명주기 판정용 현재 시각(월드 시간, 초).
+	const UWorld* TickWorld = GetWorld();
+	const double Now = TickWorld ? TickWorld->GetTimeSeconds() : 0.0;
+
 	for (TSharedPtr<FHucomsChannel>& ChPtr : Channels)
 	{
 		FHucomsChannel& Ch = *ChPtr;
@@ -431,12 +435,29 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 
 		MirrorChannel(Ch);
 
+		// --- 이 카메라를 켜 둘 것인가 ---
+		// 슬루/미러(위)는 무조건 돌린다 — 정준 PTZ 상태는 항상 정확해야 getptzfpos 가 맞다.
+		// 무거운 것(렌더 자원·텍스처 시점 등록)만 실제 수요를 따른다.
+		const bool bHasClients = Ch.Stream && Ch.Stream->HasClients();
+		bool bWarm = IsChannelWarm(Ch);
+
+		// 유휴 해제: 아무도 안 보고, 마지막 사용에서 IdleReleaseSeconds 가 지났으면 끈다.
+		if (bWarm && !bHasClients && IdleReleaseSeconds > 0.f
+			&& (Now - Ch.LastDemandTime) > static_cast<double>(IdleReleaseSeconds))
+		{
+			ReleaseChannelCapture(Ch, *FString::Printf(TEXT("유휴 %.0f초"), Now - Ch.LastDemandTime));
+			bWarm = false;
+		}
+
 		// CCTV 시점을 텍스처 스트리머에 등록 — 스트리머는 플레이어 뷰만 시점으로 쓰고
 		// SceneCapture 뷰는 등록하지 않으므로(UE5.8 GameViewportClient.cpp:1913 확인),
 		// 줌으로 당긴 원거리 텍스처가 저해상도 mip 으로 뭉개진다. 카메라 위치 + 현재 줌
-		// FOV(FOVScreenSize = 폭/tan(HFOV/2))를 매 틱 등록해 mip 이 CCTV 기준으로 올라온다.
-		if (const APTZCamera* Cam = Ch.Camera.Get())
+		// FOV(FOVScreenSize = 폭/tan(HFOV/2))를 등록해 mip 이 CCTV 기준으로 올라온다.
+		// 단 '켜져 있는' 카메라만 — 0.1.8 은 6대를 무조건 매 틱 등록해서, 아무도 안 보는
+		// 카메라의 원거리 텍스처까지 고해상도 mip 으로 상주시켜 스트리밍 풀을 넘겼다.
+		if ((bWarm || bHasClients) && Ch.Camera.IsValid())
 		{
+			const APTZCamera* Cam = Ch.Camera.Get();
 			if (Cam->CameraComp)
 			{
 				const float HalfHFovRad = FMath::DegreesToRadians(FMath::Max(1.f, Cam->CameraComp->FieldOfView)) * 0.5f;
@@ -448,7 +469,7 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 		}
 
 		// 연속 MJPEG: 클라이언트가 있을 때만 StreamFps 로 캡처(없으면 렌더 비용 0).
-		if (Ch.Stream && Ch.Stream->HasClients())
+		if (bHasClients)
 		{
 			Ch.StreamAccum += DeltaTime;
 			Ch.FpsWindowAccum += DeltaTime;
@@ -460,10 +481,15 @@ void UHucomsServerSubsystem::Tick(float DeltaTime)
 				Ch.StreamAccum = FMath::Min(Ch.StreamAccum - Interval, Interval);
 				if (UPTZCaptureComponent* Cap = ResolveCapture(Ch.Camera.Get()))
 				{
+					// 꺼져 있다 다시 켜지는 첫 프레임만 워밍업(CaptureJpeg 가 자원을 만들기 전에 판정).
+					const int32 Warmup = Cap->HasCaptureResources() ? 0 : RecreateWarmupFrames;
+					// 이 카메라를 쓴다 → 수요 기록 + 다른 카메라 끄기(VRAM 을 먼저 비우고 할당).
+					StampDemand(Ch);
+
 					TArray64<uint8> Jpeg;
 					// 스냅샷(jpeg.cgi)과 동일한 노출/대비 보정을 연속 스트림에도 적용 —
 					// 안 그러면 튜닝 슬라이더를 움직여도 이 경로를 보는 화면은 안 바뀐다.
-					if (Cap->CaptureJpeg(StreamWidth, StreamHeight, StreamJpegQuality, Jpeg, /*WarmupFrames=*/0, CaptureExposureBias, CaptureContrast) && Jpeg.Num() > 0)
+					if (Cap->CaptureJpeg(StreamWidth, StreamHeight, StreamJpegQuality, Jpeg, Warmup, CaptureExposureBias, CaptureContrast) && Jpeg.Num() > 0)
 					{
 						TArray<uint8> Frame;
 						Frame.Append(Jpeg.GetData(), IntCastChecked<int32>(Jpeg.Num()));
@@ -507,9 +533,14 @@ TArray<FString> UHucomsServerSubsystem::GetChannelStatusLines() const
 			Lines.Add(FString::Printf(TEXT("%s  http:%d  mjpeg:%d  ▶ %.1f fps  (클라이언트 %d)"),
 				*Name, Ch.HttpPort, Ch.MjpegPort, Ch.MeasuredStreamFps, Clients));
 		}
+		else if (IsChannelWarm(Ch))
+		{
+			Lines.Add(FString::Printf(TEXT("%s  http:%d  mjpeg:%d  — 켜짐 (클라이언트 없음, 곧 해제)"),
+				*Name, Ch.HttpPort, Ch.MjpegPort));
+		}
 		else
 		{
-			Lines.Add(FString::Printf(TEXT("%s  http:%d  mjpeg:%d  — 대기 (클라이언트 없음, 캡처 0)"),
+			Lines.Add(FString::Printf(TEXT("%s  http:%d  mjpeg:%d  — 꺼짐 (렌더 자원 0)"),
 				*Name, Ch.HttpPort, Ch.MjpegPort));
 		}
 	}
@@ -586,6 +617,87 @@ UPTZCaptureComponent* UHucomsServerSubsystem::ResolveCapture(APTZCamera* Cam)
 	return Cap;
 }
 
+//======================================================================================
+// 렌더 자원 생명주기 — "쓰는 카메라만 켠다"
+//======================================================================================
+UPTZCaptureComponent* UHucomsServerSubsystem::FindCapture(const FHucomsChannel& Ch) const
+{
+	APTZCamera* Cam = Ch.Camera.Get();
+	return Cam ? Cam->FindComponentByClass<UPTZCaptureComponent>() : nullptr;
+}
+
+bool UHucomsServerSubsystem::IsChannelWarm(const FHucomsChannel& Ch) const
+{
+	const UPTZCaptureComponent* Cap = FindCapture(Ch);
+	return Cap && Cap->HasCaptureResources();
+}
+
+void UHucomsServerSubsystem::ReleaseChannelCapture(FHucomsChannel& Ch, const TCHAR* Reason)
+{
+	UPTZCaptureComponent* Cap = FindCapture(Ch);
+	if (!Cap || !Cap->HasCaptureResources())
+	{
+		return; // 이미 꺼져 있음.
+	}
+	Cap->ReleaseCaptureResources();
+	UE_LOG(LogHucomsSim, Log, TEXT("[Hucoms] 카메라 끔: %s (http:%d) — %s"),
+		*GetNameSafe(Ch.Camera.Get()), Ch.HttpPort, Reason);
+}
+
+void UHucomsServerSubsystem::StampDemand(FHucomsChannel& Ch)
+{
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetTimeSeconds() : 0.0;
+	Ch.LastDemandTime = Now;
+
+	if (MaxActiveCameras <= 0)
+	{
+		return; // 상한 없음(레거시 0.1.8 동작).
+	}
+
+	// 켜져 있는 '다른' 카메라를 모은다. 두 종류는 축출하지 않는다:
+	//  - MJPEG 클라이언트가 붙은 채널: 끄면 스트림이 끊긴다.
+	//  - 방금(MinWarmSeconds 이내) 쓴 채널: 여러 카메라를 번갈아 쓰는 소비자에서 껐다 켜는
+	//    churn 이 나 오히려 더 무겁다(실측: 검출기가 6대 순회 폴링 시 1분에 173회 재생성).
+	TArray<FHucomsChannel*> Warm;
+	for (const TSharedPtr<FHucomsChannel>& OtherPtr : Channels)
+	{
+		FHucomsChannel* Other = OtherPtr.Get();
+		if (!Other || Other == &Ch)
+		{
+			continue;
+		}
+		if (Other->Stream && Other->Stream->HasClients())
+		{
+			continue; // 시청 중 — 축출 금지.
+		}
+		if ((Now - Other->LastDemandTime) <= static_cast<double>(MinWarmSeconds))
+		{
+			continue; // 방금 썼다 — 유예.
+		}
+		if (IsChannelWarm(*Other))
+		{
+			Warm.Add(Other);
+		}
+	}
+
+	// 지금 쓰는 채널이 한 자리를 차지하므로 다른 채널에 남길 수 있는 자리는 상한-1.
+	const int32 KeepOthers = FMath::Max(0, MaxActiveCameras - 1);
+	if (Warm.Num() <= KeepOthers)
+	{
+		return;
+	}
+	// 최근에 쓴 것부터 보존하고 나머지를 끈다(기본 상한 1 이면 전부 꺼진다).
+	Warm.Sort([](const FHucomsChannel& A, const FHucomsChannel& B)
+	{
+		return A.LastDemandTime > B.LastDemandTime;
+	});
+	for (int32 i = KeepOthers; i < Warm.Num(); ++i)
+	{
+		ReleaseChannelCapture(*Warm[i], TEXT("다른 카메라 사용"));
+	}
+}
+
 bool UHucomsServerSubsystem::RenderSnapshotJpeg(FHucomsChannel& Ch, TArray<uint8>& OutBytes)
 {
 	APTZCamera* Cam = Ch.Camera.Get();
@@ -595,12 +707,22 @@ bool UHucomsServerSubsystem::RenderSnapshotJpeg(FHucomsChannel& Ch, TArray<uint8
 		return false;
 	}
 
+	// 꺼져 있던 카메라를 다시 켜는 첫 캡처면 워밍업을 더 준다(Lumen/노출 히스토리가 프레임 0 이라
+	// 뜨는 것을 보정). 정상 상태의 SnapshotWarmupFrames=0(실측 최적)은 그대로 둔다.
+	// CaptureJpeg 가 자원을 만들어 버리므로 반드시 호출 '전'에 판정한다.
+	const int32 Warmup = Cap->HasCaptureResources()
+		? SnapshotWarmupFrames
+		: FMath::Max(SnapshotWarmupFrames, RecreateWarmupFrames);
+
+	// 이 카메라를 쓴다 → 수요 기록 + 다른 카메라 끄기(VRAM 을 먼저 비우고 할당).
+	StampDemand(Ch);
+
 	// 캡처 직전, 정준 상태를 카메라 FOV 에 한 번 더 반영(요청-틱 사이 정합 보장).
 	MirrorChannel(Ch);
 
 	TArray64<uint8> Jpeg;
 	// 선명도=TAA-on+Lumen(단발), 톤=노출/대비 보정으로 뷰포트에 정합.
-	if (!Cap->CaptureJpeg(SnapshotWidth, SnapshotHeight, JpegQuality, Jpeg, SnapshotWarmupFrames, CaptureExposureBias, CaptureContrast) || Jpeg.Num() == 0)
+	if (!Cap->CaptureJpeg(SnapshotWidth, SnapshotHeight, JpegQuality, Jpeg, Warmup, CaptureExposureBias, CaptureContrast) || Jpeg.Num() == 0)
 	{
 		return false;
 	}
@@ -773,6 +895,9 @@ void UHucomsServerSubsystem::ApplyGoPtz(FHucomsChannel& Ch, const FHttpServerReq
 	// 절대 이동은 진행 중인 연속(velocity) 이동을 취소한다(실기와 동일 — goto 가 jog 를 멈춘다).
 	Ch.PanVel = Ch.TiltVel = Ch.ZoomVel = 0.f;
 
+	// 카메라를 움직인다 = 곧 이 카메라를 본다 → 미리 켜 둔다(센터링 플로우 첫 장 품질).
+	StampDemand(Ch);
+
 	// 절대 이동(go-to). 클라이언트는 panpos/tiltpos 항상, zoompos/focuspos 는 선택 전송.
 	if (HasQ(Req, TEXT("panpos")))   { Ch.TgtPan   = HucomsProtocol::WrapPan(GetQInt(Req, TEXT("panpos"), Ch.CurPan)); }
 	if (HasQ(Req, TEXT("tiltpos")))  { Ch.TgtTilt  = HucomsProtocol::ClampTilt(GetQInt(Req, TEXT("tiltpos"), Ch.CurTilt)); }
@@ -812,6 +937,9 @@ bool UHucomsServerSubsystem::HandlePtControl(FHucomsChannel& Ch, const FHttpServ
 	// 고정형: 명령 무시(성공 응답). 실기 고정형 CCTV 와 동일.
 	if (!Ch.bFixed)
 	{
+		// 조작 중 = 곧 이 카메라를 본다 → 미리 켜 둔다.
+		StampDemand(Ch);
+
 		// pan: right=+(우측, panpos↑) / left=-. tilt: down=+(아래, tiltpos↑) / up=-(위).
 		if (HasQ(Req, TEXT("pan")))
 		{
@@ -845,6 +973,9 @@ bool UHucomsServerSubsystem::HandleZfControl(FHucomsChannel& Ch, const FHttpServ
 	}
 	if (!Ch.bFixed)
 	{
+		// 조작 중 = 곧 이 카메라를 본다 → 미리 켜 둔다.
+		StampDemand(Ch);
+
 		// zoom: in=+(망원, zoompos↑) / out=-. focus 연속은 sim 에서 즉시 수렴이라 미지원(파라미터는 수용).
 		if (HasQ(Req, TEXT("zoom")))
 		{
@@ -867,6 +998,9 @@ void UHucomsServerSubsystem::ApplySetCenter(FHucomsChannel& Ch, const FHttpServe
 
 	// 센터링(절대 조준)도 진행 중인 연속 이동을 취소한다.
 	Ch.PanVel = Ch.TiltVel = Ch.ZoomVel = 0.f;
+
+	// 센터링 후 곧 스냅샷을 찍는 플로우라 미리 켜 둔다(첫 장이 콜드로 뜨는 것 방지).
+	StampDemand(Ch);
 
 	// 픽셀(1920x1080 논리 프레임) -> pan/tilt 델타. TAN 핀홀 + 구면 짐벌 모델로 실기 펌웨어 재현.
 	// 기준은 '현재 위치(Cur)' - 실기는 지금 보고 있는 자세에서 센터링한다.

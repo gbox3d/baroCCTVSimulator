@@ -52,6 +52,12 @@ struct FHucomsChannel
 	float FpsWindowAccum = 0.f;
 	int32 FpsWindowFrames = 0;
 	float MeasuredStreamFps = 0.f;
+
+	// --- 렌더 자원 생명주기("이 카메라를 켜 둘 것인가") ---
+	// 이 카메라를 마지막으로 "쓴" 월드 시각(초). 수요 = 스냅샷/스트림 캡처/PTZ 이동 명령.
+	// 상태 폴링(getptzfpos·capabilityptz)은 수요가 아니다 — 헬스체크가 전 채널을 켜 두면
+	// 재설계가 무효화된다. 센티널 음수라 월드 t≈0 에서 "방금 썼다"로 오탐하지 않는다.
+	double LastDemandTime = -1.0e9;
 };
 
 /**
@@ -242,6 +248,51 @@ public:
 	int32 StreamJpegQuality = 80;
 
 	//==================================================================================
+	// 렌더 자원 생명주기 — "쓰는 카메라만 켠다"
+	//
+	// 0.1.8 까지는 한 번이라도 캡처된 카메라가 EndPlay 까지 SceneCapture + persistent
+	// ViewState + 텍스처 시점 등록을 영구히 물고 있었다. 그 결과 클라이언트 0·캡처 0 인
+	// 유휴 상태에서도 6대분 렌더 자원이 GPU 에 남아 1150ms/frame(2.5 fps)이 나왔다.
+	// 실사용은 "한 번에 한 대씩 본다"이므로, 쓰는 카메라만 켜고 나머지는 즉시 끈다.
+	//==================================================================================
+
+	/**
+	 * 동시에 렌더 자원을 들고 있을 수 있는 카메라 수. 기본 1 = 한 번에 한 대(실사용 패턴) —
+	 * 새 카메라를 쓰면 직전 카메라는 그 자리에서 꺼진다.
+	 * MJPEG 클라이언트가 붙어 있는 채널은 스트림이 끊기므로 축출 대상에서 제외된다.
+	 * 0 = 상한 없음(레거시 0.1.8 동작).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Lifecycle", meta = (ClampMin = "0"))
+	int32 MaxActiveCameras = 1;
+
+	/**
+	 * 축출 유예(초). 이 시간 안에 쓴 카메라는 MaxActiveCameras 규칙으로 끄지 않는다.
+	 *
+	 * 없으면 여러 카메라를 번갈아 쓰는 소비자(예: 검출기가 6대를 2~3초 주기로 순회 폴링)에서
+	 * 매 요청마다 껐다 켜는 churn 이 나 오히려 더 무겁다(실측: 1분에 173회 재생성).
+	 * 사람이 카메라를 바꿔 보는 속도(수 초~수 분)보다는 짧게 두어 전환 시엔 즉시 꺼지게 한다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Lifecycle", meta = (ClampMin = "0"))
+	float MinWarmSeconds = 5.f;
+
+	/**
+	 * 마지막 수요로부터 이 시간(초)이 지나고 MJPEG 클라이언트도 없으면 켜져 있던 카메라도 끈다.
+	 * 아무도 안 볼 때 자원을 0 으로 되돌리는 장치다.
+	 * 주의: 폴 간격이 이 값보다 긴 클라이언트는 매 요청마다 콜드 재생성된다 — warm 유지가
+	 * 필요하면 폴 간격보다 크게 올릴 것. 0 = 시간 기반 해제 안 함(레거시).
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Lifecycle", meta = (ClampMin = "0"))
+	float IdleReleaseSeconds = 30.f;
+
+	/**
+	 * 꺼져 있던 카메라가 다시 켜진 "첫 캡처"에만 추가로 줄 워밍업 프레임 수.
+	 * 정상 상태의 SnapshotWarmupFrames=0(실측 최적)은 그대로 두고, 콜드 시작에서만
+	 * Lumen/노출 히스토리가 프레임 0 이라 뜨는 것을 보정한다.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Hucoms|Lifecycle", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 RecreateWarmupFrames = 4;
+
+	//==================================================================================
 	// USubsystem / UWorldSubsystem / FTickableGameObject
 	//==================================================================================
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
@@ -299,6 +350,23 @@ private:
 
 	/** 채널의 카메라를 렌더해 JPEG 바이트를 채운다. 실패 시 false(호출부가 스텁 폴백). */
 	bool RenderSnapshotJpeg(FHucomsChannel& Ch, TArray<uint8>& OutBytes);
+
+	// --- 렌더 자원 생명주기("쓰는 카메라만 켠다") ---
+
+	/** 캡처 컴포넌트를 찾기만 한다(ResolveCapture 와 달리 생성하지 않음). 없으면 nullptr. */
+	UPTZCaptureComponent* FindCapture(const FHucomsChannel& Ch) const;
+
+	/** 이 채널이 지금 렌더 자원을 들고 있는가(= 켜져 있는가). */
+	bool IsChannelWarm(const FHucomsChannel& Ch) const;
+
+	/**
+	 * 이 카메라를 "썼다"고 기록하고(수요 스탬프), MaxActiveCameras 를 넘겨 켜져 있는
+	 * 다른 카메라를 끈다. 모든 캡처 경로와 PTZ 이동 명령에서 호출한다.
+	 */
+	void StampDemand(FHucomsChannel& Ch);
+
+	/** 채널의 렌더 자원을 반납한다(이미 꺼져 있으면 no-op). Reason 은 로그용. */
+	void ReleaseChannelCapture(FHucomsChannel& Ch, const TCHAR* Reason);
 
 	// --- CGI 핸들러 (채널별) ---
 	bool HandlePtzfStatus(FHucomsChannel& Ch, const FHttpServerRequest& Req, const FHttpResultCallback& OnComplete);

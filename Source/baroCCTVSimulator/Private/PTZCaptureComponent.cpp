@@ -163,13 +163,35 @@ bool UPTZCaptureComponent::CaptureJpeg(int32 Width, int32 Height, int32 Quality,
 	return true;
 }
 
-void UPTZCaptureComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void UPTZCaptureComponent::ReleaseCaptureResources()
 {
+	if (!CaptureComp && !RenderTarget)
+	{
+		return; // 이미 꺼져 있음 — 매 틱 호출돼도 무해.
+	}
+
 	if (CaptureComp)
 	{
+		// DestroyComponent -> OnUnregister 가 persistent ViewState(Lumen/TSR/노출 히스토리)를
+		// 즉시 파괴한다. 이게 유휴 카메라가 GPU 를 붙잡는 주 원인이었다.
 		CaptureComp->DestroyComponent();
 		CaptureComp = nullptr;
 	}
-	RenderTarget = nullptr; // GC 회수
+	if (RenderTarget)
+	{
+		// GC 를 기다리지 않고 RT 의 GPU 메모리를 즉시 반납.
+		RenderTarget->ReleaseResource();
+		RenderTarget = nullptr;
+	}
+	// 다음 EnsureSetup 이 새로 할당하도록 해상도 캐시 무효화.
+	RtWidth = 0;
+	RtHeight = 0;
+
+	UE_LOG(LogPTZCapture, Verbose, TEXT("[PTZCapture] 렌더 자원 반납: %s"), *GetNameSafe(GetOwner()));
+}
+
+void UPTZCaptureComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ReleaseCaptureResources();
 	Super::EndPlay(EndPlayReason);
 }
